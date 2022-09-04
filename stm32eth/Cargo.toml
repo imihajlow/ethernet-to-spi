@@ -1,0 +1,20 @@
+[package]
+name = "stm32eth"
+version = "0.1.0"
+edition = "2021"
+
+[profile.release]
+opt-level = 'z' # turn on maximum optimizations
+lto = true      # Link-time-optimizations for further size reduction
+
+[dependencies]
+cortex-m = ">=0.6.3"      # Access to the generic ARM peripherals
+cortex-m-rt = ">=0.6.12"  # Startup code for the ARM Core
+embedded-hal = ">=0.2"  # Access to generic embedded functions (`set_high`)
+panic-halt = ">=0.2.0"    # Panic handler
+nb = "~1"
+
+# Access to the stm32f103 HAL.
+[dependencies.stm32f1xx-hal]
+features = ["stm32f100", "rt", "medium"]
+path = "../../stm32f1xx-hal"
