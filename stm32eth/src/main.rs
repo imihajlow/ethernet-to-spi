@@ -55,23 +55,24 @@ fn main() -> ! {
     // SPI2
     let pin_sck = gpiob.pb13;
     let pin_mosi = gpiob.pb15;
-    let spi2 = Spi::spi2_slave(dp.SPI2, (pin_sck, NoMiso, pin_mosi), MODE);
 
     let dma = dp.DMA1.split();
 
-    let mut spi_dma_rx = Some(spi2.with_rx_dma(dma.4));
     let mut buf = Some(singleton!(: [u8; 2048] = [0; 2048]).unwrap());
-    let mut transfer: Option<_> = None;
     let mut n = 0;
+    let mut periph = Some((dp.SPI2, pin_sck, pin_mosi, dma.4));
     loop {
-        // start transfer regardless of CS
-        {
-            let spi_rx = spi_dma_rx.take().unwrap();
+        // init SPI and start transfer regardless of CS
+        let (spi, sck, mosi, dma) = periph.take().unwrap();
+        let spi2 = Spi::spi2_slave(spi, (sck, NoMiso, mosi), MODE);
+        let spi_dma_rx = spi2.with_rx_dma(dma);
+
+        let transfer = {
             let buf = buf.take().unwrap();
-            transfer = Some(spi_rx.read(buf));
-            writeln!(uart_tx, "transfer start {}", n);
-            n += 1;
-        }
+            spi_dma_rx.read(buf)
+        };
+        writeln!(uart_tx, "transfer start {}", n);
+        n += 1;
         // wait for CS to go low
         while !pin_cs.is_low() {}
         // wait for CS to go high
@@ -79,7 +80,6 @@ fn main() -> ! {
 
         // finish transfer
         {
-            let transfer = transfer.take().unwrap();
             let (ret_buf, ret_rx) = transfer.stop();
             let ndtr = ret_rx.channel.get_ndtr() as usize;
             writeln!(uart_tx, "transfer end, ndtr = {}", ndtr);
@@ -88,7 +88,11 @@ fn main() -> ! {
             }
             uart_tx.write_char('\n');
             buf.replace(ret_buf);
-            spi_dma_rx.replace(ret_rx);
+
+            // release SPI to reset it
+            let (spi, dma) = ret_rx.release();
+            let (spi, (sck, _, mosi)) = spi.release();
+            periph.replace((spi, sck, mosi, dma));
         }
     }
 }
