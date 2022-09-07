@@ -1,0 +1,19 @@
+/* https://wavedrom.com/editor.html */
+{signal: [
+  {name: "data", wave: "z222222z|222222z", data: ["1", "0", "1", "0", "1", "1", "1", "0", "1", "0", "1", "1"], period: 2, phase: 0.2},
+  {node: ".ab", period: 2, phase: 0.2},
+  {name: "line", wave: "0..1.0.1.0.10..x|101.0.1.0.101..", phase: 0.2},
+  {name: "n_line", wave: "1..0.1.0.1.01..x|010.1.0.1.010..", phase: 0.2},
+  {name: "edge_in", wave: "0..0.0.0.0.000.x|000.0.0.0.000..", node: "...g........."},
+  {},
+  {name: "sck", wave: "0.....1..01..01..01..01..01..0.x|0....1..01..01..01..01..01..0..", period: 0.5, node: "......c..d", phase: -0.2},
+  {name: "n_idle", wave: "0..1...........0|.1............0", node: "...h...........f", phase: -0.2},
+  {name: "edge_ena", wave: "1...............|01............0", node: "...............", phase: -0.2},
+  {name: "edge", wave: "0..0.0.0.0.000..|..0.0.0.0.000..", node: ".............e"},
+  {node: "x..............y.z..............w",},
+],
+  edge: ['a~>b 100ns', 'c->d 75ns', 'e~>f 150ns', 'g->h', 'x<->y line low when idle', 'z<->w line high when idle'],
+  config: {hscale: 1},
+  head: {text: "Ethernet decoder"}
+}
+
