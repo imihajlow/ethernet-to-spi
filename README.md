@@ -19,14 +19,14 @@ When the line is idle, the output of an 75C1168 is undefined. In my case it was 
 The filtering of the first edge is done using the already generated `~idle` signal.
 
 
-![first edge filtering](/image/firstfilter.jpeg)
+![first edge filtering](/images/firstfilter.jpeg)
 
 *First edge is filtered*
 
 The resulting filtered edge signal is fed onto a non-retriggerable monostable circuit which generates a pulse of approximately 75 nS, which is finally used as an SPI clock.
 
-![SPI signal](/image/spi1.jpeg)
+![SPI signal](/images/spi1.jpeg)
 
-![SPI signal](/image/spi2.jpeg)
+![SPI signal](/images/spi2.jpeg)
 
 *Blue - generated SPI SCK signal, yellow - SPI MOSI which is just the input 10BASE-T signal.*
