@@ -8,7 +8,7 @@ Then, edges are detected using a 74HC86 XOR.
 
 ![edge detect](/images/edgedetect.jpeg)
 
-* Blue is the input signal, yellow - detected edges. *
+*Blue is the input signal, yellow - detected edges.*
 
 Then, an `~idle` signal is formed using a delay circuit. It goes from 0 to 1 with the first edge and goes back to 0 after approximately 2 µS after the last transition. This signal is used by the MCU to detect the end of an Ethernet frame.
 
@@ -21,7 +21,7 @@ The filtering of the first edge is done using the already generated `~idle` sign
 
 ![first edge filtering](/image/firstfilter.jpeg)
 
-* First edge is filtered *
+*First edge is filtered*
 
 The resulting filtered edge signal is fed onto a non-retriggerable monostable circuit which generates a pulse of approximately 75 nS, which is finally used as an SPI clock.
 
@@ -29,4 +29,4 @@ The resulting filtered edge signal is fed onto a non-retriggerable monostable ci
 
 ![SPI signal](/image/spi2.jpeg)
 
-* Blue - generated SPI SCK signal, yellow - SPI MOSI which is just the input 10BASE-T signal. *
+*Blue - generated SPI SCK signal, yellow - SPI MOSI which is just the input 10BASE-T signal.*
