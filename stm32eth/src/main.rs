@@ -11,7 +11,7 @@ use stm32f1xx_hal::{
     pac::{self},
     prelude::*,
     serial::{Config, Serial},
-    spi::{NoMiso, Spi},
+    spi::{NoMiso, Spi, SpiBitFormat},
 }; // STM32F1 specific functions // When a panic occurs, stop the microcontroller
 
 use core::fmt::Write;
@@ -23,20 +23,20 @@ pub const MODE: Mode = Mode {
 
 #[entry]
 fn main() -> ! {
-    // Get handles to the hardware objects. These functions can only be called
-    // once, so that the borrowchecker can ensure you don't reconfigure
-    // something by accident.
     let dp = pac::Peripherals::take().unwrap();
-    let cp = cortex_m::Peripherals::take().unwrap();
 
-    let mut rcc = dp.RCC.constrain();
+    let rcc = dp.RCC.constrain();
     let mut gpioc = dp.GPIOC.split();
 
     let mut afio = dp.AFIO.constrain();
     let mut gpiob = dp.GPIOB.split();
 
     let mut flash = dp.FLASH.constrain();
-    let clocks = rcc.cfgr.sysclk(8.MHz()).freeze(&mut flash.acr);
+    let clocks = rcc.cfgr
+        .use_hse(8.MHz())
+        .sysclk(40.MHz())
+        .pclk1(20.MHz())
+        .freeze(&mut flash.acr);
 
     let pin_cs = gpioc.pc6.into_floating_input(&mut gpioc.crl);
 
@@ -64,29 +64,30 @@ fn main() -> ! {
     loop {
         // init SPI and start transfer regardless of CS
         let (spi, sck, mosi, dma) = periph.take().unwrap();
-        let spi2 = Spi::spi2_slave(spi, (sck, NoMiso, mosi), MODE);
+        let mut spi2 = Spi::spi2_slave(spi, (sck, NoMiso, mosi), MODE);
+        spi2.bit_format(SpiBitFormat::LsbFirst);
         let spi_dma_rx = spi2.with_rx_dma(dma);
 
         let transfer = {
             let buf = buf.take().unwrap();
             spi_dma_rx.read(buf)
         };
-        writeln!(uart_tx, "transfer start {}", n);
+        writeln!(uart_tx, "transfer start {}", n).ok();
         n += 1;
-        // wait for CS to go low
-        while !pin_cs.is_low() {}
         // wait for CS to go high
         while !pin_cs.is_high() {}
+        // wait for CS to go low
+        while !pin_cs.is_low() {}
 
         // finish transfer
         {
             let (ret_buf, ret_rx) = transfer.stop();
             let ndtr = ret_rx.channel.get_ndtr() as usize;
-            writeln!(uart_tx, "transfer end, ndtr = {}", ndtr);
+            writeln!(uart_tx, "transfer end, ndtr = {}", ndtr).ok();
             for i in 0..ret_buf.len() - ndtr {
-                write!(uart_tx, "{:02X} ", ret_buf[i]);
+                write!(uart_tx, "{:02X} ", ret_buf[i]).ok();
             }
-            uart_tx.write_char('\n');
+            uart_tx.write_char('\n').ok();
             buf.replace(ret_buf);
 
             // release SPI to reset it
