@@ -72,8 +72,6 @@ fn main() -> ! {
             let buf = buf.take().unwrap();
             spi_dma_rx.read(buf)
         };
-        writeln!(uart_tx, "transfer start {}", n).ok();
-        n += 1;
         // wait for CS to go high
         while !pin_cs.is_high() {}
         // wait for CS to go low
@@ -83,11 +81,12 @@ fn main() -> ! {
         {
             let (ret_buf, ret_rx) = transfer.stop();
             let ndtr = ret_rx.channel.get_ndtr() as usize;
-            writeln!(uart_tx, "transfer end, ndtr = {}", ndtr).ok();
-            for i in 0..ret_buf.len() - ndtr {
-                write!(uart_tx, "{:02X} ", ret_buf[i]).ok();
+            if ret_buf.len() - ndtr != 0 {
+                for i in 0..ret_buf.len() - ndtr {
+                    write!(uart_tx, "{:02X} ", ret_buf[i]).ok();
+                }
+                uart_tx.write_char('\n').ok();
             }
-            uart_tx.write_char('\n').ok();
             buf.replace(ret_buf);
 
             // release SPI to reset it
