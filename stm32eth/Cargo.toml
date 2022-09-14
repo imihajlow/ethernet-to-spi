@@ -14,8 +14,10 @@ embedded-hal = ">=0.2"  # Access to generic embedded functions (`set_high`)
 panic-halt = ">=0.2.0"    # Panic handler
 nb = "~1"
 cortex-m-rtic = ">=1.1"
+embedded-dma = ">=0.2"
+crc = "2"
 
 # Access to the stm32f103 HAL.
 [dependencies.stm32f1xx-hal]
 features = ["stm32f100", "rt", "medium"]
-path = "../../stm32f1xx-hal"
+path = "../stm32f1xx-hal"
