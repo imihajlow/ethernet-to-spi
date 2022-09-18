@@ -25,6 +25,26 @@ impl<const L: usize> TxFrameBuf<L> {
         }
     }
 
+    pub fn new_with_fn<F, R>(buf: &'static mut [u8; L], len: usize, f: F) -> (Self, R)
+    where
+        F: FnOnce(&mut [u8]) -> R,
+    {
+        buf[0..PREAMBLE.len()].copy_from_slice(&PREAMBLE);
+        let slice = &mut buf[PREAMBLE.len()..PREAMBLE.len()+len];
+        let result = f(slice);
+        let mut digest = CRC.digest();
+        digest.update(slice);
+        let crc = digest.finalize().to_le_bytes();
+        buf[len + PREAMBLE.len()..len + PREAMBLE.len() + crc.len()].copy_from_slice(&crc);
+        (
+            Self {
+                buf: buf,
+                len: len + PREAMBLE.len() + crc.len(),
+            },
+            result,
+        )
+    }
+
     pub fn release(self) -> &'static mut [u8; L] {
         self.buf
     }

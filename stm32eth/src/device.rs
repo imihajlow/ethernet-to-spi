@@ -16,7 +16,7 @@ impl<MR: rtic::Mutex<T = Receiver>> SpiDevice<MR> {
         Some(Self {
             receiver,
             rx_buf: None,
-            tx_buf: singleton!(: [u8; 1600] = [0; 1600]).unwrap(),
+            tx_buf: singleton!(: [u8; 1600] = [0; 1600])?,
         })
     }
 }
@@ -63,10 +63,9 @@ impl<'a, MR: rtic::Mutex<T = Receiver>> smoltcp::phy::RxToken for RxToken<'a, MR
     where
         F: FnOnce(&mut [u8]) -> smoltcp::Result<R>,
     {
-        let result = f(&mut self.buf[8..self.len-4]);
+        let result = f(&mut self.buf[8..self.len - 4]);
         self.receiver.lock(|receiver| {
             receiver.return_buffer(self.buf);
-            receiver.start_listen();
         });
         result
     }

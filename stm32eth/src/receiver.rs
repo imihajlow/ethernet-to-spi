@@ -95,6 +95,7 @@ impl Receiver {
                 }
             },
         );
+        self.start_listen();
     }
 
     pub fn start_listen(&mut self) {
