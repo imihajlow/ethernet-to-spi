@@ -1,6 +1,8 @@
 #![no_std]
 #![no_main]
 
+mod device;
+mod receiver;
 mod tx_frame_buf;
 
 use panic_halt as _;
@@ -8,16 +10,13 @@ use panic_halt as _;
 #[rtic::app(device = stm32f1xx_hal::pac, dispatchers = [ADC])]
 mod app {
     use cortex_m::singleton;
-    use embedded_hal::{
-        spi::{Mode, Phase, Polarity},
-    }; // The runtime
+    use embedded_hal::spi::{Mode, Phase, Polarity}; // The runtime
 
     use stm32f1xx_hal::{
         afio::MAPR,
         device::SPI1,
-        device::SPI2,
         dma::dma1,
-        gpio::{Cr, Edge, ExtiPin, Output, PA0, PA5, PA7, PB13, PB15, PC6},
+        gpio::{Cr, Edge, ExtiPin, Output, PA0, PA5, PA7},
         pac,
         pac::USART3,
         prelude::*,
@@ -30,14 +29,13 @@ mod app {
     use core::arch::asm;
     use core::fmt::Write;
 
-    use crate::tx_frame_buf::TxFrameBuf;
+    use crate::{tx_frame_buf::TxFrameBuf, receiver::{Receiver}};
 
     pub const MODE: Mode = Mode {
         phase: Phase::CaptureOnFirstTransition,
         polarity: Polarity::IdleLow,
     };
 
-    type SpiRxPeriph = (SPI2, PB13, PB15, dma1::C4);
     pub struct SpiTxPeriph {
         spi: SPI1,
         sck: PA5<Output>,
@@ -52,12 +50,11 @@ mod app {
     struct Shared {
         tx_spi_periph: Option<SpiTxPeriph>,
         uart_tx: Tx<USART3>,
+        receiver: Receiver,
     }
 
     #[local]
     struct Local {
-        rx_spi_periph: Option<SpiRxPeriph>,
-        rx_pin_cs: PC6,
         nlp_timer: Counter<pac::TIM1, 1000>,
         button_pin: PA0,
         tx_buf: Option<&'static mut [u8; 512]>,
@@ -82,7 +79,6 @@ mod app {
             .pclk1(20.MHz())
             .freeze(&mut flash.acr);
 
-        let pin_cs = gpioc.pc6.into_floating_input(&mut gpioc.crl);
 
         let pin_tx = gpiob.pb10.into_alternate_push_pull(&mut gpiob.crh);
         let pin_rx = gpiob.pb11;
@@ -99,10 +95,23 @@ mod app {
         // SPI2
         let pin_sck = gpiob.pb13;
         let pin_mosi = gpiob.pb15;
+        let mut pin_cs = gpioc.pc6.into_floating_input(&mut gpioc.crl);
+        pin_cs.make_interrupt_source(&mut afio);
+        pin_cs.enable_interrupt(&mut dp.EXTI);
+        pin_cs.trigger_on_edge(&mut dp.EXTI, Edge::Falling);
 
         let dma = dp.DMA1.split();
 
-        let periph = Some((dp.SPI2, pin_sck, pin_mosi, dma.4));
+        let rx_buf = singleton!(: [u8; crate::receiver::BUFFER_LEN] = [0; crate::receiver::BUFFER_LEN]).unwrap();
+        let receiver = Receiver::new(
+            dp.SPI2,
+            pin_sck,
+            pin_mosi,
+            pin_cs,
+            dma.4,
+            rx_buf
+        );
+
         let mut pin_tx_sck = gpioa.pa5.into_push_pull_output(&mut gpioa.crl);
         let mut pin_tx_mosi = gpioa.pa7.into_push_pull_output(&mut gpioa.crl);
 
@@ -118,8 +127,6 @@ mod app {
         button_pin.enable_interrupt(&mut dp.EXTI);
         button_pin.trigger_on_edge(&mut dp.EXTI, Edge::Rising);
 
-        task_rx::spawn().unwrap();
-
         (
             Shared {
                 tx_spi_periph: Some(SpiTxPeriph {
@@ -132,10 +139,9 @@ mod app {
                     clocks: clocks,
                 }),
                 uart_tx: uart_tx,
+                receiver,
             },
             Local {
-                rx_spi_periph: periph,
-                rx_pin_cs: pin_cs,
                 nlp_timer: timer,
                 button_pin: button_pin,
                 tx_buf: singleton!(: [u8; 512] = [0; 512]),
@@ -144,45 +150,29 @@ mod app {
         )
     }
 
-    #[task(local = [rx_spi_periph, rx_pin_cs], shared = [uart_tx])]
-    fn task_rx(mut ctx: task_rx::Context) {
-        let periph = ctx.local.rx_spi_periph;
-        let mut buf = Some(singleton!(: [u8; 2048] = [0; 2048]).unwrap());
-        let pin_cs = ctx.local.rx_pin_cs;
+    #[idle(shared = [receiver, uart_tx])]
+    fn idle(mut ctx: idle::Context) -> ! {
+        ctx.shared.receiver.lock(|receiver| {
+            receiver.start_listen();
+        });
         loop {
-            // init SPI and start transfer regardless of CS
-            let (spi, sck, mosi, dma) = periph.take().unwrap();
-            let mut spi2 = Spi::spi2_slave(spi, (sck, NoMiso, mosi), MODE);
-            spi2.bit_format(SpiBitFormat::LsbFirst);
-            let spi_dma_rx = spi2.with_rx_dma(dma);
-
-            let transfer = {
-                let buf = buf.take().unwrap();
-                spi_dma_rx.read(buf)
-            };
-            // wait for CS to go high
-            while !pin_cs.is_high() {}
-            // wait for CS to go low
-            while !pin_cs.is_low() {}
-
-            // finish transfer
-            {
-                let (ret_buf, ret_rx) = transfer.stop();
-                let ndtr = ret_rx.channel.get_ndtr() as usize;
-                if ret_buf.len() - ndtr != 0 {
-                    ctx.shared.uart_tx.lock(|uart_tx| {
-                        for i in 0..ret_buf.len() - ndtr {
-                            write!(uart_tx, "{:02X} ", ret_buf[i]).ok();
-                        }
-                        uart_tx.write_char('\n').ok();
+            let d = ctx.shared.receiver.lock(|receiver| {
+                receiver.try_get_data()
+            });
+            if let Some((buf, len)) = d {
+                ctx.shared.uart_tx.lock(|tx| {
+                    for i in 0..len {
+                        write!(tx, "{:02X} ", buf[i]).ok();
+                    }
+                    tx.write_char('\n').ok();
+                    ctx.shared.receiver.lock(|receiver| {
+                        writeln!(tx, "before return: {}", receiver).ok();
+                        receiver.return_buffer(buf);
+                        writeln!(tx, "before start: {}", receiver).ok();
+                        receiver.start_listen();
+                        writeln!(tx, "after start: {}", receiver).ok();
                     });
-                }
-                buf.replace(ret_buf);
-
-                // release SPI to reset it
-                let (spi, dma) = ret_rx.release();
-                let (spi, (sck, _, mosi)) = spi.release();
-                periph.replace((spi, sck, mosi, dma));
+                });
             }
         }
     }
@@ -199,6 +189,21 @@ mod app {
             }
         });
         ctx.local.nlp_timer.clear_interrupt(Event::Update);
+    }
+
+    #[task(binds = EXTI9_5, priority = 3, shared = [receiver, uart_tx])]
+    fn task_cs_down(mut ctx: task_cs_down::Context) {
+        ctx.shared.uart_tx.lock(|tx| {
+            writeln!(tx, "cs down").ok();
+            ctx.shared.receiver.lock(|receiver| {
+                let result = receiver.on_frame_end();
+                receiver.clear_cs_interrupt();
+                match result {
+                    Ok(l) => writeln!(tx, "received {} bytes", l),
+                    Err(e) => writeln!(tx, "frame error: {}", e)
+                };
+            });
+        });
     }
 
     #[task(binds = EXTI0, priority = 3, local = [button_pin, tx_buf], shared = [tx_spi_periph, uart_tx])]
@@ -227,12 +232,10 @@ mod app {
             spi1.bit_format(SpiBitFormat::LsbFirst);
 
             let frame = [
-                0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-                0x11, 0x22, 0x33, 0x44, 0x55, 0x66,
-                0x90, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05,
-                0x06, 0x07, 0x08, 0x09, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x21,
-                0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36,
-                0x37, 0x38, 0x39,
+                0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x90, 0x00,
+                0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x11, 0x12, 0x13, 0x14, 0x15,
+                0x16, 0x17, 0x18, 0x19, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x31,
+                0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39,
             ];
             let var_len_buf = TxFrameBuf::new(buf, &frame);
 
@@ -246,8 +249,7 @@ mod app {
             let (spi1, dma) = spi_dma.release();
             p.dma = dma;
 
-            while spi1.is_busy() {
-            }
+            while spi1.is_busy() {}
 
             let (spi, (sck_alt, _, mosi_alt)) = spi1.release();
             p.spi = spi;
