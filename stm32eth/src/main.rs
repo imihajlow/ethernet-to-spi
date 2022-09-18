@@ -16,17 +16,14 @@ mod app {
         afio::MAPR,
         device::SPI1,
         dma::dma1,
-        gpio::{Cr, Edge, ExtiPin, Output, PA0, PA5, PA7},
-        pac,
+        gpio::{Cr, Edge, ExtiPin, Output, PA0, PA5, PA7, PB1},
         pac::USART3,
         prelude::*,
         rcc::Clocks,
         serial::{Config, Serial, Tx},
-        spi::{NoMiso, Spi, SpiBitFormat},
-        timer::{Counter, Event},
+        spi::{NoMiso, Spi, SpiBitFormat}
     };
 
-    use core::arch::asm;
     use core::fmt::Write;
 
     use crate::{tx_frame_buf::TxFrameBuf, receiver::{Receiver}};
@@ -55,8 +52,8 @@ mod app {
 
     #[local]
     struct Local {
-        nlp_timer: Counter<pac::TIM1, 1000>,
         button_pin: PA0,
+        pin_nlp_disa: PB1<Output>,
         tx_buf: Option<&'static mut [u8; 512]>,
     }
 
@@ -114,13 +111,12 @@ mod app {
 
         let mut pin_tx_sck = gpioa.pa5.into_push_pull_output(&mut gpioa.crl);
         let mut pin_tx_mosi = gpioa.pa7.into_push_pull_output(&mut gpioa.crl);
+        let mut pin_nlp_disa = gpiob.pb1.into_push_pull_output(&mut gpiob.crl);
 
-        pin_tx_sck.set_low();
+        pin_nlp_disa.set_low();
+
+        pin_tx_sck.set_high();
         pin_tx_mosi.set_low();
-
-        let mut timer = dp.TIM1.counter_ms(&clocks);
-        timer.start(16.millis()).unwrap();
-        timer.listen(Event::Update);
 
         let mut button_pin = gpioa.pa0.into_floating_input(&mut gpioa.crl);
         button_pin.make_interrupt_source(&mut afio);
@@ -142,9 +138,9 @@ mod app {
                 receiver,
             },
             Local {
-                nlp_timer: timer,
                 button_pin: button_pin,
                 tx_buf: singleton!(: [u8; 512] = [0; 512]),
+                pin_nlp_disa,
             },
             init::Monotonics(),
         )
@@ -177,20 +173,6 @@ mod app {
         }
     }
 
-    #[task(binds = TIM1_UP_TIM16, local = [nlp_timer], shared = [uart_tx, tx_spi_periph], priority = 2)]
-    fn task_nlp(mut ctx: task_nlp::Context) {
-        ctx.shared.tx_spi_periph.lock(|periph| {
-            if let Some(SpiTxPeriph { mosi: pin_mosi, .. }) = periph {
-                pin_mosi.set_high();
-                unsafe {
-                    asm!("nop", "nop");
-                }
-                pin_mosi.set_low();
-            }
-        });
-        ctx.local.nlp_timer.clear_interrupt(Event::Update);
-    }
-
     #[task(binds = EXTI9_5, priority = 3, shared = [receiver, uart_tx])]
     fn task_cs_down(mut ctx: task_cs_down::Context) {
         ctx.shared.uart_tx.lock(|tx| {
@@ -206,9 +188,11 @@ mod app {
         });
     }
 
-    #[task(binds = EXTI0, priority = 3, local = [button_pin, tx_buf], shared = [tx_spi_periph, uart_tx])]
+    #[task(binds = EXTI0, priority = 3, local = [button_pin, tx_buf, pin_nlp_disa], shared = [tx_spi_periph, uart_tx])]
     fn task_btn(mut ctx: task_btn::Context) {
         ctx.local.button_pin.clear_interrupt_pending_bit();
+
+        ctx.local.pin_nlp_disa.set_high();
 
         ctx.shared.uart_tx.lock(|uart_tx| {
             writeln!(uart_tx, "Button is pressed!").ok();
@@ -223,7 +207,7 @@ mod app {
                 (sck_alt, NoMiso, mosi_alt),
                 &mut p.mapr,
                 Mode {
-                    polarity: Polarity::IdleHigh,
+                    polarity: Polarity::IdleLow,
                     phase: Phase::CaptureOnFirstTransition,
                 },
                 10.MHz(),
@@ -255,10 +239,11 @@ mod app {
             p.spi = spi;
             p.sck = sck_alt.into_push_pull_output(&mut p.cr);
             p.mosi = mosi_alt.into_push_pull_output(&mut p.cr);
-            p.sck.set_low();
+            p.sck.set_high();
             p.mosi.set_low();
             periph.replace(p);
             ctx.local.tx_buf.replace(buf);
         });
+        ctx.local.pin_nlp_disa.set_low();
     }
 }
