@@ -1,86 +1,103 @@
-use crate::receiver::{Receiver, RxBuf};
-use cortex_m::singleton;
-use smoltcp::phy::Device;
+use crate::{
+    receiver::{Receiver, RxBuf},
+    transmitter::Transmitter,
+};
 
-pub struct SpiDevice<MR>
-where
-    MR: rtic::Mutex<T = Receiver>,
-{
-    receiver: MR,
-    rx_buf: Option<RxBuf>,
-    tx_buf: &'static mut [u8; 1600],
+use core::cell::RefCell;
+use cortex_m::interrupt;
+use smoltcp::phy::{Device, DeviceCapabilities, Medium};
+
+pub type ReceiverMutex = &'static cortex_m::interrupt::Mutex<RefCell<Option<Receiver>>>;
+pub struct SpiDevice {
+    receiver: ReceiverMutex,
+    transmitter: Transmitter,
 }
 
-impl<MR: rtic::Mutex<T = Receiver>> SpiDevice<MR> {
-    pub fn new(receiver: MR) -> Option<Self> {
-        Some(Self {
+impl SpiDevice {
+    pub fn new(receiver: ReceiverMutex, transmitter: Transmitter) -> Self {
+        Self {
             receiver,
-            rx_buf: None,
-            tx_buf: singleton!(: [u8; 1600] = [0; 1600])?,
-        })
+            transmitter,
+        }
     }
 }
 
-impl<'a, MR: rtic::Mutex<T = Receiver> + 'a> Device<'a> for SpiDevice<MR> {
-    type RxToken = RxToken<'a, MR>;
+impl<'a> Device<'a> for SpiDevice {
+    type RxToken = RxToken;
 
-    type TxToken = TxToken;
+    type TxToken = TxToken<'a>;
 
     fn receive(&'a mut self) -> Option<(Self::RxToken, Self::TxToken)> {
-        let b = self.receiver.lock(|receiver| receiver.try_get_data());
+        let b = interrupt::free(|cs| {
+            self.receiver
+                .borrow(cs)
+                .borrow_mut()
+                .as_mut()
+                .unwrap()
+                .try_get_data()
+        });
         match b {
             Some((buf, len)) => Some((
                 RxToken {
                     buf,
                     len,
-                    receiver: &mut self.receiver,
+                    receiver: self.receiver,
                 },
-                TxToken(),
+                TxToken(&mut self.transmitter),
             )),
             None => None,
         }
     }
 
     fn transmit(&'a mut self) -> Option<Self::TxToken> {
-        todo!()
+        Some(TxToken(&mut self.transmitter))
     }
 
     fn capabilities(&self) -> smoltcp::phy::DeviceCapabilities {
-        todo!()
+        let mut caps = DeviceCapabilities::default();
+        caps.medium = Medium::Ethernet;
+        caps.max_transmission_unit = crate::transmitter::MTU;
+        caps.max_burst_size = Some(1);
+        caps
     }
 }
 
-pub struct RxToken<'a, MR: rtic::Mutex<T = Receiver>> {
+pub struct RxToken {
     buf: RxBuf,
     len: usize,
-    receiver: &'a mut MR,
+    receiver: ReceiverMutex,
 }
 
-pub struct TxToken();
+pub struct TxToken<'a>(&'a mut Transmitter);
 
-impl<'a, MR: rtic::Mutex<T = Receiver>> smoltcp::phy::RxToken for RxToken<'a, MR> {
-    fn consume<R, F>(self, timestamp: smoltcp::time::Instant, f: F) -> smoltcp::Result<R>
+impl smoltcp::phy::RxToken for RxToken {
+    fn consume<R, F>(self, _timestamp: smoltcp::time::Instant, f: F) -> smoltcp::Result<R>
     where
         F: FnOnce(&mut [u8]) -> smoltcp::Result<R>,
     {
         let result = f(&mut self.buf[8..self.len - 4]);
-        self.receiver.lock(|receiver| {
-            receiver.return_buffer(self.buf);
+        interrupt::free(|cs| {
+            self.receiver
+                .borrow(cs)
+                .borrow_mut()
+                .as_mut()
+                .unwrap()
+                .return_buffer(self.buf)
         });
         result
     }
 }
 
-impl smoltcp::phy::TxToken for TxToken {
+impl<'a> smoltcp::phy::TxToken for TxToken<'a> {
     fn consume<R, F>(
         self,
-        timestamp: smoltcp::time::Instant,
+        _timestamp: smoltcp::time::Instant,
         len: usize,
         f: F,
     ) -> smoltcp::Result<R>
     where
         F: FnOnce(&mut [u8]) -> smoltcp::Result<R>,
     {
-        todo!()
+        self.0.transmit(len, f).unwrap()
     }
 }

@@ -10,8 +10,15 @@ use panic_halt as _;
 
 #[rtic::app(device = stm32f1xx_hal::pac, dispatchers = [ADC])]
 mod app {
-    use cortex_m::singleton;
+    use crate::device::ReceiverMutex;
+    use cortex_m::{interrupt, interrupt::Mutex, singleton};
+    use systick_monotonic::Systick;
 
+    use smoltcp::{
+        iface::{InterfaceBuilder, NeighborCache, SocketStorage},
+        time::Instant,
+        wire::{EthernetAddress, IpAddress, IpCidr},
+    };
     use stm32f1xx_hal::{
         gpio::{Edge, ExtiPin, PA0},
         pac::USART3,
@@ -19,23 +26,27 @@ mod app {
         serial::{Config, Serial, Tx},
     };
 
-    use core::fmt::Write;
+    use core::{cell::RefCell, fmt::Write};
 
-    use crate::{receiver::Receiver, transmitter::Transmitter};
+    use crate::{device::SpiDevice, receiver::Receiver, transmitter::Transmitter};
+
+    #[monotonic(binds = SysTick, default = true)]
+    type MyMono = Systick<1000>; // 1000 Hz
 
     #[shared]
     struct Shared {
         uart_tx: Tx<USART3>,
-        receiver: Receiver,
     }
 
     #[local]
     struct Local {
         button_pin: PA0,
-        transmitter: Transmitter,
+        transmitter: Option<Transmitter>,
+        receiver_idle: ReceiverMutex,
+        receiver_cs_down: ReceiverMutex,
     }
 
-    #[init]
+    #[init(local = [receiver: Mutex<RefCell<Option<Receiver>>> = Mutex::new(RefCell::new(None))])]
     fn init(cx: init::Context) -> (Shared, Local, init::Monotonics) {
         let mut dp = cx.device;
 
@@ -53,6 +64,8 @@ mod app {
             .sysclk(40.MHz())
             .pclk1(20.MHz())
             .freeze(&mut flash.acr);
+
+        let mono = Systick::new(cx.core.SYST, 40_000_000);
 
         let pin_tx = gpiob.pb10.into_alternate_push_pull(&mut gpiob.crh);
         let pin_rx = gpiob.pb11;
@@ -80,6 +93,7 @@ mod app {
             singleton!(: [u8; crate::receiver::BUFFER_LEN] = [0; crate::receiver::BUFFER_LEN])
                 .unwrap();
         let receiver = Receiver::new(dp.SPI2, pin_sck, pin_mosi, pin_cs, dma.4, rx_buf);
+        interrupt::free(|cs| cx.local.receiver.borrow(cs).borrow_mut().replace(receiver));
 
         let pin_tx_sck = gpioa.pa5.into_push_pull_output(&mut gpioa.crl);
         let pin_tx_mosi = gpioa.pa7.into_push_pull_output(&mut gpioa.crl);
@@ -105,46 +119,66 @@ mod app {
         );
 
         (
-            Shared {
-                uart_tx: uart_tx,
-                receiver,
-            },
+            Shared { uart_tx: uart_tx },
             Local {
                 button_pin: button_pin,
-                transmitter,
+                transmitter: Some(transmitter),
+                receiver_idle: cx.local.receiver,
+                receiver_cs_down: cx.local.receiver,
             },
-            init::Monotonics(),
+            init::Monotonics(mono),
         )
     }
 
-    #[idle(shared = [receiver, uart_tx])]
+    #[idle(shared = [uart_tx], local = [receiver_idle, transmitter])]
     fn idle(mut ctx: idle::Context) -> ! {
-        ctx.shared.receiver.lock(|receiver| {
-            receiver.start_listen();
+        let receiver = ctx.local.receiver_idle;
+        interrupt::free(|cs| {
+            receiver
+                .borrow(cs)
+                .borrow_mut()
+                .as_mut()
+                .unwrap()
+                .start_listen()
         });
+
+        let device = SpiDevice::new(receiver, ctx.local.transmitter.take().unwrap());
+        let mut sockets = [SocketStorage::EMPTY; 2];
+        let mut neighbor_cache_storage = [None; 8];
+        let hwaddr = EthernetAddress([0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
+        let neighbor_cache = NeighborCache::new(&mut neighbor_cache_storage[..]);
+        let ip_addr = IpCidr::new(IpAddress::v4(10, 0, 0, 100), 24);
+        let mut ip_addr_storage = [ip_addr; 1];
+
+        let mut iface = InterfaceBuilder::new(device, &mut sockets[..])
+            .hardware_addr(hwaddr.into())
+            .neighbor_cache(neighbor_cache)
+            .ip_addrs(&mut ip_addr_storage[..])
+            .finalize();
+
         loop {
-            let d = ctx.shared.receiver.lock(|receiver| receiver.try_get_data());
-            if let Some((buf, len)) = d {
-                ctx.shared.uart_tx.lock(|tx| {
-                    for i in 0..len {
-                        write!(tx, "{:02X} ", buf[i]).ok();
-                    }
-                    tx.write_char('\n').ok();
-                });
-                ctx.shared.receiver.lock(|receiver| {
-                    receiver.return_buffer(buf);
-                });
-            }
+            let now = Instant::from_millis(monotonics::now().ticks() as i64);
+            iface.poll(now).ok();
         }
     }
 
-    #[task(binds = EXTI9_5, priority = 3, shared = [receiver, uart_tx])]
+    #[task(binds = EXTI9_5, priority = 3, shared = [uart_tx], local = [receiver_cs_down])]
     fn task_cs_down(mut ctx: task_cs_down::Context) {
+        let receiver = ctx.local.receiver_cs_down;
+
         ctx.shared.uart_tx.lock(|tx| {
             writeln!(tx, "cs down").ok();
-            ctx.shared.receiver.lock(|receiver| {
-                let result = receiver.on_frame_end();
-                receiver.clear_cs_interrupt();
+            interrupt::free(|cs| {
+                let result = receiver
+                    .borrow(cs)
+                    .borrow_mut()
+                    .as_mut()
+                    .map(|r| {
+                        let result = r.on_frame_end();
+                        r.clear_cs_interrupt();
+                        result
+                    })
+                    .unwrap();
                 match result {
                     Ok(l) => writeln!(tx, "received {} bytes", l).ok(),
                     Err(e) => writeln!(tx, "frame error: {}", e).ok(),
@@ -153,21 +187,12 @@ mod app {
         });
     }
 
-    #[task(binds = EXTI0, priority = 3, local = [button_pin, transmitter], shared = [uart_tx])]
+    #[task(binds = EXTI0, priority = 3, local = [button_pin], shared = [uart_tx])]
     fn task_btn(mut ctx: task_btn::Context) {
         ctx.local.button_pin.clear_interrupt_pending_bit();
 
         ctx.shared.uart_tx.lock(|uart_tx| {
             writeln!(uart_tx, "Button is pressed!").ok();
-        });
-        let frame = [
-            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x90, 0x00,
-            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x11, 0x12, 0x13, 0x14, 0x15,
-            0x16, 0x17, 0x18, 0x19, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x31,
-            0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39,
-        ];
-        ctx.local.transmitter.transmit(frame.len(), |dst| {
-            dst.copy_from_slice(&frame);
         });
     }
 }

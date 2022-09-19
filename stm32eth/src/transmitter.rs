@@ -12,6 +12,7 @@ use stm32f1xx_hal::{
 use crate::tx_frame_buf::TxFrameBuf;
 
 pub const BUFFER_LEN: usize = 1600;
+pub const MTU: usize = BUFFER_LEN - 8 - 4;
 
 pub type TxBuf = &'static mut [u8; BUFFER_LEN];
 

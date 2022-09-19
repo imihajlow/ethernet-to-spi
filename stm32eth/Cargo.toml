@@ -16,6 +16,7 @@ nb = "~1"
 cortex-m-rtic = ">=1.1"
 embedded-dma = ">=0.2"
 crc = "2"
+systick-monotonic = "1"
 
 [dependencies.stm32f1xx-hal]
 features = ["stm32f100", "rt", "medium"]
