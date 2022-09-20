@@ -32,8 +32,6 @@ use crate::device::ReceiverMutex;
 
     use crate::{device::SpiDevice, receiver::Receiver, transmitter::Transmitter};
 
-    use crate::receiver::FrameError;
-
     #[defmt::global_logger]
     struct Logger;
 
@@ -45,6 +43,9 @@ use crate::device::ReceiverMutex;
         }
 
         unsafe fn flush() {
+            if let Some(tx) = &mut UART_TX {
+                tx.flush();
+            }
         }
 
         unsafe fn release() {
@@ -176,7 +177,7 @@ use crate::device::ReceiverMutex;
         let device = SpiDevice::new(receiver, ctx.local.transmitter.take().unwrap());
         let mut sockets = [SocketStorage::EMPTY; 2];
         let mut neighbor_cache_storage = [None; 8];
-        let hwaddr = EthernetAddress([0x10, 0x22, 0x33, 0x44, 0x55, 0x66]);
+        let hwaddr = EthernetAddress([0x06, 0x22, 0x33, 0x44, 0x55, 0x66]);
         let neighbor_cache = NeighborCache::new(&mut neighbor_cache_storage[..]);
         let ip_addr = IpCidr::new(IpAddress::v4(10, 0, 0, 100), 24);
         let mut ip_addr_storage = [ip_addr; 1];
@@ -231,6 +232,6 @@ use crate::device::ReceiverMutex;
     fn task_btn(mut ctx: task_btn::Context) {
         ctx.local.button_pin.clear_interrupt_pending_bit();
 
-        defmt::info!("Button is pressed!");
+        defmt::debug!("Button is pressed!");
     }
 }
