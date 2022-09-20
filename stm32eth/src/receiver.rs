@@ -1,4 +1,5 @@
 use crc::{Crc, CRC_32_ISO_HDLC};
+use defmt::Format;
 use stm32f1xx_hal::{
     device::SPI2,
     dma::{self, dma1, ReadDma, RxDma},
@@ -43,11 +44,12 @@ pub enum Receiver {
     Invalid,
 }
 
+#[derive(Format)]
 pub enum FrameError {
     InvalidLength(usize),
     InvalidFcs,
     InvalidPreamble,
-    InvalidState,
+    InvalidState(&'static str),
     StartListen,
 }
 
@@ -170,7 +172,7 @@ impl Receiver {
                                 (result, Self::Idle(periph, ret_buf))
                             }
                         }
-                        _ => (Err(FrameError::InvalidState), s),
+                        _ => (Err(FrameError::InvalidState(s.get_state_name())), s),
                     }
                 },
             );
@@ -194,6 +196,17 @@ impl Receiver {
             }
             Self::Invalid => (),
         };
+    }
+
+    fn get_state_name(&self) -> &'static str {
+        match self {
+            Receiver::Idle(_, _) => "Idle",
+            Receiver::WaitFrameEnd(_, _) => "WaitFrameEnd",
+            Receiver::Listen(_, _) => "Listen",
+            Receiver::Data(_, _, _) => "Data",
+            Receiver::Process(_) => "Process",
+            Receiver::Invalid => "Invalid",
+        }
     }
 }
 
@@ -229,7 +242,7 @@ impl fmt::Display for FrameError {
         match self {
             FrameError::InvalidLength(l) => write!(f, "invalid length: {}", l),
             FrameError::InvalidFcs => f.write_str("invalid FCS"),
-            FrameError::InvalidState => f.write_str("invalid state"),
+            FrameError::InvalidState(s) => write!(f, "invalid state {}", s),
             FrameError::InvalidPreamble => f.write_str("wrong preamble"),
             FrameError::StartListen => f.write_str("last frame dropped"),
         }

@@ -10,7 +10,9 @@ use panic_halt as _;
 
 #[rtic::app(device = stm32f1xx_hal::pac, dispatchers = [ADC])]
 mod app {
-    use crate::device::ReceiverMutex;
+    use smoltcp::wire::Ipv4Address;
+use smoltcp::iface::Routes;
+use crate::device::ReceiverMutex;
     use cortex_m::{interrupt, interrupt::Mutex, singleton};
     use systick_monotonic::Systick;
 
@@ -26,16 +28,41 @@ mod app {
         serial::{Config, Serial, Tx},
     };
 
-    use core::{cell::RefCell, fmt::Write};
+    use core::{cell::RefCell};
 
     use crate::{device::SpiDevice, receiver::Receiver, transmitter::Transmitter};
+
+    use crate::receiver::FrameError;
+
+    #[defmt::global_logger]
+    struct Logger;
+
+    static mut UART_TX: Option<Tx<USART3>> = None;
+
+    unsafe impl defmt::Logger for Logger {
+        fn acquire() {
+            cortex_m::interrupt::disable();
+        }
+
+        unsafe fn flush() {
+        }
+
+        unsafe fn release() {
+            cortex_m::interrupt::enable();
+        }
+
+        unsafe fn write(bytes: &[u8]) {
+            if let Some(tx) = &mut UART_TX {
+                tx.bwrite_all(bytes).ok();
+            }
+        }
+    }
 
     #[monotonic(binds = SysTick, default = true)]
     type MyMono = Systick<1000>; // 1000 Hz
 
     #[shared]
     struct Shared {
-        uart_tx: Tx<USART3>,
     }
 
     #[local]
@@ -78,6 +105,9 @@ mod app {
         );
 
         let (uart_tx, _rx) = serial.split();
+        unsafe {
+            UART_TX.replace(uart_tx);
+        }
 
         // SPI2
         let pin_sck = gpiob.pb13;
@@ -119,7 +149,7 @@ mod app {
         );
 
         (
-            Shared { uart_tx: uart_tx },
+            Shared {},
             Local {
                 button_pin: button_pin,
                 transmitter: Some(transmitter),
@@ -130,8 +160,9 @@ mod app {
         )
     }
 
-    #[idle(shared = [uart_tx], local = [receiver_idle, transmitter])]
+    #[idle(local = [receiver_idle, transmitter])]
     fn idle(mut ctx: idle::Context) -> ! {
+        defmt::trace!("idle task started");
         let receiver = ctx.local.receiver_idle;
         interrupt::free(|cs| {
             receiver
@@ -145,54 +176,61 @@ mod app {
         let device = SpiDevice::new(receiver, ctx.local.transmitter.take().unwrap());
         let mut sockets = [SocketStorage::EMPTY; 2];
         let mut neighbor_cache_storage = [None; 8];
-        let hwaddr = EthernetAddress([0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
+        let hwaddr = EthernetAddress([0x10, 0x22, 0x33, 0x44, 0x55, 0x66]);
         let neighbor_cache = NeighborCache::new(&mut neighbor_cache_storage[..]);
         let ip_addr = IpCidr::new(IpAddress::v4(10, 0, 0, 100), 24);
         let mut ip_addr_storage = [ip_addr; 1];
+        let default_v4_gw = Ipv4Address::new(10, 0, 0, 1);
+        let mut routes_storage = [None; 2];
+        let mut routes = Routes::new(&mut routes_storage[..]);
+        routes.add_default_ipv4_route(default_v4_gw).unwrap();
 
         let mut iface = InterfaceBuilder::new(device, &mut sockets[..])
             .hardware_addr(hwaddr.into())
             .neighbor_cache(neighbor_cache)
             .ip_addrs(&mut ip_addr_storage[..])
+            .routes(routes)
             .finalize();
+        defmt::trace!("interface created");
 
         loop {
             let now = Instant::from_millis(monotonics::now().ticks() as i64);
-            iface.poll(now).ok();
+            match iface.poll(now) {
+                Ok(_) => (),
+                Err(smoltcp::Error::Unrecognized) => (),
+                Err(e) => {
+                    defmt::error!("poll error {}", e);
+                }
+            };
         }
     }
 
-    #[task(binds = EXTI9_5, priority = 3, shared = [uart_tx], local = [receiver_cs_down])]
+    #[task(binds = EXTI9_5, priority = 3, local = [receiver_cs_down])]
     fn task_cs_down(mut ctx: task_cs_down::Context) {
         let receiver = ctx.local.receiver_cs_down;
 
-        ctx.shared.uart_tx.lock(|tx| {
-            writeln!(tx, "cs down").ok();
-            interrupt::free(|cs| {
-                let result = receiver
-                    .borrow(cs)
-                    .borrow_mut()
-                    .as_mut()
-                    .map(|r| {
-                        let result = r.on_frame_end();
-                        r.clear_cs_interrupt();
-                        result
-                    })
-                    .unwrap();
-                match result {
-                    Ok(l) => writeln!(tx, "received {} bytes", l).ok(),
-                    Err(e) => writeln!(tx, "frame error: {}", e).ok(),
-                };
-            });
+        interrupt::free(|cs| {
+            let result = receiver
+                .borrow(cs)
+                .borrow_mut()
+                .as_mut()
+                .map(|r| {
+                    let result = r.on_frame_end();
+                    r.clear_cs_interrupt();
+                    result
+                })
+                .unwrap();
+            match result {
+                Ok(l) => defmt::info!("received {} bytes", l),
+                Err(e) => defmt::error!("frame error: {}", e),
+            };
         });
     }
 
-    #[task(binds = EXTI0, priority = 3, local = [button_pin], shared = [uart_tx])]
+    #[task(binds = EXTI0, priority = 3, local = [button_pin])]
     fn task_btn(mut ctx: task_btn::Context) {
         ctx.local.button_pin.clear_interrupt_pending_bit();
 
-        ctx.shared.uart_tx.lock(|uart_tx| {
-            writeln!(uart_tx, "Button is pressed!").ok();
-        });
+        defmt::info!("Button is pressed!");
     }
 }
