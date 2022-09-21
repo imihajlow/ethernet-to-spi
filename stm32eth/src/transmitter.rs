@@ -1,3 +1,4 @@
+use cortex_m::asm;
 use replace_with::{replace_with_and_return};
 use stm32f1xx_hal::{
     afio::MAPR,
@@ -68,9 +69,9 @@ impl Transmitter {
     {
         replace_with_and_return(self, || Self::Invalid, |s| {
             if let Self::Idle(mut periph, buf) = s {
-                let (frame_buf, result) = TxFrameBuf::new_with_fn(buf, len, f);
-
                 periph.nlp_disa.set_high();
+
+                let (frame_buf, result) = TxFrameBuf::new_with_fn(buf, len, f);
 
                 let sck_alt = periph.sck.into_alternate_push_pull(&mut periph.cr);
                 let mosi_alt = periph.mosi.into_alternate_push_pull(&mut periph.cr);
@@ -98,6 +99,8 @@ impl Transmitter {
                 periph.dma = dma;
 
                 while spi1.is_busy() {}
+
+                asm::delay(400);
 
                 let (spi, (sck_alt, _, mosi_alt)) = spi1.release();
                 periph.spi = spi;

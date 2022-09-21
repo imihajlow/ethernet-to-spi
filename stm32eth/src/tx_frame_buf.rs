@@ -1,3 +1,4 @@
+use core::cmp::max;
 use crc::{Crc, CRC_32_ISO_HDLC};
 use embedded_dma::ReadBuffer;
 
@@ -11,20 +12,6 @@ const PREAMBLE: [u8; 8] = [0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0xd5];
 const CRC: Crc<u32> = Crc::<u32>::new(&CRC_32_ISO_HDLC);
 
 impl<const L: usize> TxFrameBuf<L> {
-    pub fn new(buf: &'static mut [u8; L], data: &[u8]) -> Self {
-        let len = data.len();
-        buf[0..PREAMBLE.len()].copy_from_slice(&PREAMBLE);
-        buf[PREAMBLE.len()..len + PREAMBLE.len()].copy_from_slice(data);
-        let mut digest = CRC.digest();
-        digest.update(data);
-        let crc = digest.finalize().to_le_bytes();
-        buf[len + PREAMBLE.len()..len + PREAMBLE.len() + crc.len()].copy_from_slice(&crc);
-        Self {
-            buf: buf,
-            len: data.len() + PREAMBLE.len() + crc.len(),
-        }
-    }
-
     pub fn new_with_fn<F, R>(buf: &'static mut [u8; L], len: usize, f: F) -> (Self, R)
     where
         F: FnOnce(&mut [u8]) -> R,
@@ -32,14 +19,16 @@ impl<const L: usize> TxFrameBuf<L> {
         buf[0..PREAMBLE.len()].copy_from_slice(&PREAMBLE);
         let slice = &mut buf[PREAMBLE.len()..PREAMBLE.len()+len];
         let result = f(slice);
+        let padded_len = max(len, 60);
+        buf[PREAMBLE.len()+len..PREAMBLE.len()+padded_len].fill(0);
         let mut digest = CRC.digest();
-        digest.update(slice);
+        digest.update(&buf[PREAMBLE.len()..PREAMBLE.len()+padded_len]);
         let crc = digest.finalize().to_le_bytes();
-        buf[len + PREAMBLE.len()..len + PREAMBLE.len() + crc.len()].copy_from_slice(&crc);
+        buf[padded_len + PREAMBLE.len()..padded_len + PREAMBLE.len() + crc.len()].copy_from_slice(&crc);
         (
             Self {
                 buf: buf,
-                len: len + PREAMBLE.len() + crc.len(),
+                len: padded_len + PREAMBLE.len() + crc.len(),
             },
             result,
         )
