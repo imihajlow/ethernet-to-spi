@@ -1,13 +1,13 @@
 use cortex_m::asm;
-use replace_with::{replace_with_and_return};
+use replace_with::replace_with_and_return;
 use stm32f1xx_hal::{
     afio::MAPR,
     device::SPI1,
     dma::dma1,
     gpio::{Cr, Output, PA5, PA7, PB1},
-    spi::{Spi, NoMiso, Mode, Polarity, Phase, SpiBitFormat},
-    rcc::Clocks,
     prelude::*,
+    rcc::Clocks,
+    spi::{Mode, NoMiso, Phase, Polarity, Spi, SpiBitFormat},
 };
 
 use crate::tx_frame_buf::TxFrameBuf;
@@ -29,12 +29,13 @@ pub struct SpiTxPeriph {
 }
 
 pub enum Transmitter {
-    Idle(SpiTxPeriph, TxBuf),
+    Idle(SpiTxPeriph, TxBuf, bool),
     Invalid,
 }
 
 impl Transmitter {
     pub fn new(
+        invert_polarity: bool,
         spi: SPI1,
         mut sck: PA5<Output>,
         mut mosi: PA7<Output>,
@@ -43,10 +44,15 @@ impl Transmitter {
         cr: Cr<'A', false>,
         mapr: MAPR,
         clocks: Clocks,
-        buf: TxBuf
+        buf: TxBuf,
     ) -> Self {
         nlp_disa.set_low();
-        sck.set_high();
+
+        if invert_polarity {
+            sck.set_low();
+        } else {
+            sck.set_high();
+        }
         mosi.set_low();
         Self::Idle(
             SpiTxPeriph {
@@ -60,6 +66,7 @@ impl Transmitter {
                 clocks,
             },
             buf,
+            invert_polarity,
         )
     }
 
@@ -67,53 +74,62 @@ impl Transmitter {
     where
         F: FnOnce(&mut [u8]) -> R,
     {
-        replace_with_and_return(self, || Self::Invalid, |s| {
-            if let Self::Idle(mut periph, buf) = s {
-                periph.nlp_disa.set_high();
+        replace_with_and_return(
+            self,
+            || Self::Invalid,
+            |s| {
+                if let Self::Idle(mut periph, buf, invert_polarity) = s {
+                    periph.nlp_disa.set_high();
 
-                let (frame_buf, result) = TxFrameBuf::new_with_fn(buf, len, f);
+                    let (frame_buf, result) = TxFrameBuf::new_with_fn(buf, len, f);
 
-                let sck_alt = periph.sck.into_alternate_push_pull(&mut periph.cr);
-                let mosi_alt = periph.mosi.into_alternate_push_pull(&mut periph.cr);
-                let mut spi1 = Spi::spi1(
-                    periph.spi,
-                    (sck_alt, NoMiso, mosi_alt),
-                    &mut periph.mapr,
-                    Mode {
-                        polarity: Polarity::IdleLow,
-                        phase: Phase::CaptureOnFirstTransition,
-                    },
-                    10.MHz(),
-                    periph.clocks,
-                );
-                spi1.bit_format(SpiBitFormat::LsbFirst);
-                let spi_dma = spi1.with_tx_dma(periph.dma);
+                    let sck_alt = periph.sck.into_alternate_push_pull(&mut periph.cr);
+                    let mosi_alt = periph.mosi.into_alternate_push_pull(&mut periph.cr);
+                    let mut spi1 = Spi::spi1(
+                        periph.spi,
+                        (sck_alt, NoMiso, mosi_alt),
+                        &mut periph.mapr,
+                        Mode {
+                            // polarity: if invert_polarity { Polarity::IdleHigh } else {Polarity::IdleLow},
+                            polarity: Polarity::IdleLow,
+                            phase: Phase::CaptureOnFirstTransition,
+                        },
+                        10.MHz(),
+                        periph.clocks,
+                    );
+                    spi1.bit_format(SpiBitFormat::LsbFirst);
+                    let spi_dma = spi1.with_tx_dma(periph.dma);
 
-                let transfer = spi_dma.write(frame_buf);
+                    let transfer = spi_dma.write(frame_buf);
 
-                let (frame_buf, spi_dma) = transfer.wait();
+                    let (frame_buf, spi_dma) = transfer.wait();
 
-                let buf = frame_buf.release();
+                    let buf = frame_buf.release();
 
-                let (spi1, dma) = spi_dma.release();
-                periph.dma = dma;
+                    let (spi1, dma) = spi_dma.release();
+                    periph.dma = dma;
 
-                while spi1.is_busy() {}
+                    while spi1.is_busy() {}
 
-                asm::delay(400);
+                    asm::delay(400);
 
-                let (spi, (sck_alt, _, mosi_alt)) = spi1.release();
-                periph.spi = spi;
-                periph.sck = sck_alt.into_push_pull_output(&mut periph.cr);
-                periph.mosi = mosi_alt.into_push_pull_output(&mut periph.cr);
-                periph.sck.set_high();
-                periph.mosi.set_low();
+                    let (spi, (sck_alt, _, mosi_alt)) = spi1.release();
+                    periph.spi = spi;
+                    periph.sck = sck_alt.into_push_pull_output(&mut periph.cr);
+                    periph.mosi = mosi_alt.into_push_pull_output(&mut periph.cr);
+                    if invert_polarity {
+                        periph.sck.set_low();
+                    } else {
+                        periph.sck.set_high();
+                    }
+                    periph.mosi.set_low();
 
-                periph.nlp_disa.set_low();
-                (Some(result), Self::Idle(periph, buf))
-            } else {
-                (None, s)
-            }
-        })
+                    periph.nlp_disa.set_low();
+                    (Some(result), Self::Idle(periph, buf, invert_polarity))
+                } else {
+                    (None, s)
+                }
+            },
+        )
     }
 }
