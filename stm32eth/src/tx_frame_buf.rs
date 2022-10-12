@@ -12,19 +12,25 @@ const PREAMBLE: [u8; 8] = [0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0xd5];
 const CRC: Crc<u32> = Crc::<u32>::new(&CRC_32_ISO_HDLC);
 
 impl<const L: usize> TxFrameBuf<L> {
-    pub fn new_with_fn<F, R>(buf: &'static mut [u8; L], len: usize, f: F) -> (Self, R)
+    pub fn new_with_fn<F, R>(buf: &'static mut [u8; L], len: usize, f: F, invert: bool) -> (Self, R)
     where
         F: FnOnce(&mut [u8]) -> R,
     {
         buf[0..PREAMBLE.len()].copy_from_slice(&PREAMBLE);
-        let slice = &mut buf[PREAMBLE.len()..PREAMBLE.len()+len];
+        let slice = &mut buf[PREAMBLE.len()..PREAMBLE.len() + len];
         let result = f(slice);
         let padded_len = max(len, 60);
-        buf[PREAMBLE.len()+len..PREAMBLE.len()+padded_len].fill(0);
+        buf[PREAMBLE.len() + len..PREAMBLE.len() + padded_len].fill(0);
         let mut digest = CRC.digest();
-        digest.update(&buf[PREAMBLE.len()..PREAMBLE.len()+padded_len]);
+        digest.update(&buf[PREAMBLE.len()..PREAMBLE.len() + padded_len]);
         let crc = digest.finalize().to_le_bytes();
-        buf[padded_len + PREAMBLE.len()..padded_len + PREAMBLE.len() + crc.len()].copy_from_slice(&crc);
+        buf[padded_len + PREAMBLE.len()..padded_len + PREAMBLE.len() + crc.len()]
+            .copy_from_slice(&crc);
+        if invert {
+            buf[0..PREAMBLE.len() + padded_len + crc.len()]
+                .iter_mut()
+                .for_each(|x| *x = !*x);
+        }
         (
             Self {
                 buf: buf,

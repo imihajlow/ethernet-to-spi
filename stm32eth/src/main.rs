@@ -12,6 +12,8 @@ use panic_halt as _;
 #[rtic::app(device = stm32f1xx_hal::pac, dispatchers = [ADC])]
 mod app {
     use crate::device::ReceiverMutex;
+    use core::fmt::Write;
+    use core::sync::atomic::{AtomicUsize, Ordering};
     // use crate::server::Server;
     use cortex_m::{interrupt, interrupt::Mutex, singleton};
     use httparse::Status;
@@ -83,6 +85,8 @@ mod app {
         receiver_cs_down: ReceiverMutex,
     }
 
+    static BUTTON_PRESS_COUNT: AtomicUsize = AtomicUsize::new(0);
+
     #[init(local = [receiver: Mutex<RefCell<Option<Receiver>>> = Mutex::new(RefCell::new(None))])]
     fn init(cx: init::Context) -> (Shared, Local, init::Monotonics) {
         let mut dp = cx.device;
@@ -147,7 +151,9 @@ mod app {
         button_pin.trigger_on_edge(&mut dp.EXTI, Edge::Rising);
 
         let transmitter = Transmitter::new(
-            false,
+            true,
+            true,
+            true,
             dp.SPI1,
             pin_tx_sck,
             pin_tx_mosi,
@@ -171,7 +177,7 @@ mod app {
         )
     }
 
-    #[idle(local = [receiver_idle, transmitter])]
+    #[idle(local = [receiver_idle, transmitter, ])]
     fn idle(ctx: idle::Context) -> ! {
         defmt::trace!("idle task started");
         let receiver = ctx.local.receiver_idle;
@@ -206,20 +212,20 @@ mod app {
 
         let dhcp_handle = iface.add_socket(dhcp_socket);
 
-        let mut tcp_rx_buffer_storage = [0 as u8; 512];
-        let mut tcp_tx_buffer_storage = [0 as u8; 512];
-        let tcp_rx_buffer = TcpSocketBuffer::new(&mut tcp_rx_buffer_storage[..]);
-        let tcp_tx_buffer = TcpSocketBuffer::new(&mut tcp_tx_buffer_storage[..]);
-        let tcp_socket = TcpSocket::new(tcp_rx_buffer, tcp_tx_buffer);
+        // let mut tcp_rx_buffer_storage = [0 as u8; 512];
+        // let mut tcp_tx_buffer_storage = [0 as u8; 512];
+        // let tcp_rx_buffer = TcpSocketBuffer::new(&mut tcp_rx_buffer_storage[..]);
+        // let tcp_tx_buffer = TcpSocketBuffer::new(&mut tcp_tx_buffer_storage[..]);
+        // let tcp_socket = TcpSocket::new(tcp_rx_buffer, tcp_tx_buffer);
 
-        let tcp_handle = iface.add_socket(tcp_socket);
+        // let tcp_handle = iface.add_socket(tcp_socket);
         loop {
             defmt::info!("iteration");
             let mut request_done = false;
-            let mut buf = [0 as u8; 512];
-            let mut buf_slice = Some(&mut buf[..]);
-            let mut headers = [httparse::EMPTY_HEADER; 16];
-            let mut req = httparse::Request::new(&mut headers);
+            // let mut buf = [0 as u8; 384];
+            // let mut buf_slice = Some(&mut buf[..]);
+            // let mut headers = [httparse::EMPTY_HEADER; 16];
+            // let mut req = httparse::Request::new(&mut headers);
 
             while !request_done {
                 let now = Instant::from_millis(monotonics::now().ticks() as i64);
@@ -261,63 +267,66 @@ mod app {
                     }
                 }
 
-                let socket = iface.get_socket::<TcpSocket>(tcp_handle);
-                if !socket.is_open() {
-                    socket.listen(80).ok();
-                }
-                if socket.may_recv() {
-                    let r = socket.recv(|buffer| {
-                        let recvd_len = buffer.len();
-                        let slice = buf_slice.take().unwrap();
-                        let r = if recvd_len > slice.len() {
-                            None
-                        } else {
-                            let (dst, rest) = slice.split_at_mut(recvd_len);
-                            dst.copy_from_slice(buffer);
-                            Some((dst, rest))
-                        };
-                        (recvd_len, r)
-                    });
-                    let response = match r {
-                        Err(e) => {
-                            // 500
-                            defmt::error!("error in socket {}", e);
-                            Some("HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nError in socket")
-                        }
-                        Ok(None) => {
-                            // 500
-                            defmt::error!("buffer overrun");
-                            Some("HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nBuffer overrun")
-                        }
-                        Ok(Some((dst, rest))) => {
-                            buf_slice.replace(rest);
-                            let r = req.parse(dst);
-                            match r {
-                                Err(_) => {
-                                    defmt::error!("error in request");
-                                    Some("HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nBad Request")
-                                }
-                                Ok(Status::Partial) => None,
-                                Ok(Status::Complete(_)) => {
-                                    // ok
-                                    defmt::info!("requested method: {}", req.method);
-                                    defmt::info!("requested path: {}", req.path);
-                                    if req.method == Some("GET") && req.path.is_some() {
-                                        Some(get_content(req.path.unwrap()))
-                                    } else {
-                                        // 405
-                                        Some("HTTP/1.1 405 Method Not Allowed\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nMethod Not Allowed")
-                                    }
-                                }
-                            }
-                        }
-                    };
-                    if let Some(response_text) = response {
-                        request_done = true;
-                        socket.send_slice(response_text.as_bytes()).ok();
-                        socket.close();
-                    }
-                }
+                // let socket = iface.get_socket::<TcpSocket>(tcp_handle);
+                // if !socket.is_open() {
+                //     socket.listen(80).ok();
+                // }
+                // if socket.may_recv() {
+                //     let r = socket.recv(|buffer| {
+                //         let recvd_len = buffer.len();
+                //         let slice = buf_slice.take().unwrap();
+                //         let r = if recvd_len > slice.len() {
+                //             None
+                //         } else {
+                //             let (dst, rest) = slice.split_at_mut(recvd_len);
+                //             dst.copy_from_slice(buffer);
+                //             Some((dst, rest))
+                //         };
+                //         (recvd_len, r)
+                //     });
+                //     request_done = match r {
+                //         Err(e) => {
+                //             // 500
+                //             defmt::error!("error in socket {}", e);
+                //             write!(socket, "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nError in socket").ok();
+                //             true
+                //         }
+                //         Ok(None) => {
+                //             // 500
+                //             defmt::error!("buffer overrun");
+                //             write!(socket, "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nBuffer overrun").ok();
+                //             true
+                //         }
+                //         Ok(Some((dst, rest))) => {
+                //             buf_slice.replace(rest);
+                //             let r = req.parse(dst);
+                //             match r {
+                //                 Err(_) => {
+                //                     defmt::error!("error in request");
+                //                     write!(socket, "HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nBad Request").ok();
+                //                     true
+                //                 }
+                //                 Ok(Status::Partial) => false,
+                //                 Ok(Status::Complete(_)) => {
+                //                     // ok
+                //                     defmt::info!("requested method: {}", req.method);
+                //                     defmt::info!("requested path: {}", req.path);
+                //                     if req.method == Some("GET") && req.path.is_some() {
+                //                         write_response(socket, req.path.unwrap()).ok();
+                //                         true
+                //                     } else {
+                //                         // 405
+                //                         write!(socket, "HTTP/1.1 405 Method Not Allowed\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nMethod Not Allowed").ok();
+                //                         true
+                //                     }
+                //                 }
+                //             }
+                //         }
+                //     };
+                //     if request_done {
+                //         socket.close();
+                //     }
+                // }
             }
         }
     }
@@ -347,8 +356,9 @@ mod app {
     #[task(binds = EXTI0, priority = 3, local = [button_pin])]
     fn task_btn(ctx: task_btn::Context) {
         ctx.local.button_pin.clear_interrupt_pending_bit();
+        let prev = BUTTON_PRESS_COUNT.fetch_add(1, Ordering::SeqCst);
 
-        defmt::debug!("Button is pressed!");
+        defmt::debug!("Button is pressed! {}", prev);
     }
 
     fn set_ipv4_addr<DeviceT>(iface: &mut Interface<'_, DeviceT>, cidr: Ipv4Cidr)
@@ -361,13 +371,23 @@ mod app {
         });
     }
 
-    fn get_content(path: &str) -> &'static str {
-        match path {
+    fn write_response<W: core::fmt::Write>(socket: &mut W, path: &str) -> core::fmt::Result {
+        let r = match path {
             "/" =>
-                concat!("HTTP/1.1 200 Ok\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n",
-                    include_str!("index.html")),
+                socket.write_str(concat!("HTTP/1.1 200 Ok\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n",
+                    include_str!("index.html"))),
+            "/button.txt" => {
+                let press_count = BUTTON_PRESS_COUNT.load(Ordering::SeqCst);
+                defmt::info!("get button.txt {}", press_count);
+                socket.write_str("HTTP/1.1 200 Ok\r\nContent-Type: text/plain\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n")?;
+                write!(socket, "{}", press_count)
+            }
             _ =>
-                "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nNot found"
+                socket.write_str("HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nNot found")
+        };
+        if r.is_err() {
+            defmt::error!("write error!");
         }
+        r
     }
 }

@@ -29,13 +29,21 @@ pub struct SpiTxPeriph {
 }
 
 pub enum Transmitter {
-    Idle(SpiTxPeriph, TxBuf, bool),
+    Idle {
+        periph: SpiTxPeriph,
+        buf: TxBuf,
+        invert_idle: bool,
+        invert_data: bool,
+        invert_sck_pol: bool,
+    },
     Invalid,
 }
 
 impl Transmitter {
     pub fn new(
-        invert_polarity: bool,
+        invert_idle: bool,
+        invert_data: bool,
+        invert_sck_pol: bool,
         spi: SPI1,
         mut sck: PA5<Output>,
         mut mosi: PA7<Output>,
@@ -48,14 +56,14 @@ impl Transmitter {
     ) -> Self {
         nlp_disa.set_low();
 
-        if invert_polarity {
+        if invert_idle {
             sck.set_low();
         } else {
             sck.set_high();
         }
         mosi.set_low();
-        Self::Idle(
-            SpiTxPeriph {
+        Self::Idle {
+            periph: SpiTxPeriph {
                 spi,
                 sck,
                 mosi,
@@ -66,8 +74,10 @@ impl Transmitter {
                 clocks,
             },
             buf,
-            invert_polarity,
-        )
+            invert_idle,
+            invert_data,
+            invert_sck_pol,
+        }
     }
 
     pub fn transmit<R, F>(&mut self, len: usize, f: F) -> Option<R>
@@ -78,10 +88,17 @@ impl Transmitter {
             self,
             || Self::Invalid,
             |s| {
-                if let Self::Idle(mut periph, buf, invert_polarity) = s {
+                if let Self::Idle {
+                    mut periph,
+                    buf,
+                    invert_idle,
+                    invert_data,
+                    invert_sck_pol,
+                } = s
+                {
                     periph.nlp_disa.set_high();
 
-                    let (frame_buf, result) = TxFrameBuf::new_with_fn(buf, len, f);
+                    let (frame_buf, result) = TxFrameBuf::new_with_fn(buf, len, f, invert_data);
 
                     let sck_alt = periph.sck.into_alternate_push_pull(&mut periph.cr);
                     let mosi_alt = periph.mosi.into_alternate_push_pull(&mut periph.cr);
@@ -90,9 +107,9 @@ impl Transmitter {
                         (sck_alt, NoMiso, mosi_alt),
                         &mut periph.mapr,
                         Mode {
-                            // polarity: if invert_polarity { Polarity::IdleHigh } else {Polarity::IdleLow},
-                            polarity: Polarity::IdleLow,
-                            phase: Phase::CaptureOnFirstTransition,
+                            polarity: if invert_sck_pol { Polarity::IdleHigh } else {Polarity::IdleLow},
+                            // phase: Phase::CaptureOnFirstTransition,
+                            phase: Phase::CaptureOnSecondTransition,
                         },
                         10.MHz(),
                         periph.clocks,
@@ -117,7 +134,7 @@ impl Transmitter {
                     periph.spi = spi;
                     periph.sck = sck_alt.into_push_pull_output(&mut periph.cr);
                     periph.mosi = mosi_alt.into_push_pull_output(&mut periph.cr);
-                    if invert_polarity {
+                    if invert_idle {
                         periph.sck.set_low();
                     } else {
                         periph.sck.set_high();
@@ -125,7 +142,16 @@ impl Transmitter {
                     periph.mosi.set_low();
 
                     periph.nlp_disa.set_low();
-                    (Some(result), Self::Idle(periph, buf, invert_polarity))
+                    (
+                        Some(result),
+                        Self::Idle {
+                            periph,
+                            buf,
+                            invert_idle,
+                            invert_data,
+                            invert_sck_pol,
+                        },
+                    )
                 } else {
                     (None, s)
                 }
