@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-// mod device;
+mod device;
 mod receiver;
 // mod server;
 mod transmitter;
@@ -12,45 +12,36 @@ use panic_halt as _;
 
 #[rtic::app(device = stm32f4xx_hal::pac, dispatchers = [ADC])]
 mod app {
-    // use crate::device::ReceiverMutex;
-    use core::fmt::Write;
+    use crate::device::{ReceiverMutex, SpiDevice};
+    use crate::receiver::Receiver;
+    use crate::transmitter::Transmitter;
+
     use core::sync::atomic::{AtomicUsize, Ordering};
+    use smoltcp::iface::InterfaceBuilder;
+    use smoltcp::iface::NeighborCache;
+    use smoltcp::time::Instant;
+    use smoltcp::wire::EthernetAddress;
+    use smoltcp::wire::IpCidr;
     // use crate::server::Server;
     use cortex_m::{interrupt, interrupt::Mutex, singleton};
-    use stm32f4xx_hal::dma::config::DmaConfig;
-    use stm32f4xx_hal::dma::traits::Stream;
-    use stm32f4xx_hal::dma::{Stream3, StreamsTuple, Transfer};
-    use stm32f4xx_hal::gpio::{Edge, Input, NoPin, Output, PushPull};
-    use stm32f4xx_hal::pac::{DMA1, SPI2, TIM2};
-    use stm32f4xx_hal::spi::{Mode, NoMiso, Phase, Polarity, Slave, Spi, BitFormat};
-    use stm32f4xx_hal::timer::{CounterMs, Event};
-    // use httparse::Status;
-    // use smoltcp::iface::Interface;
-    // use smoltcp::iface::Routes;
-    // use smoltcp::phy::Device;
-    // use smoltcp::socket::TcpSocket;
-    // use smoltcp::socket::TcpSocketBuffer;
-    // use smoltcp::socket::{Dhcpv4Event, Dhcpv4Socket};
-    // use smoltcp::time::Duration;
-    // use smoltcp::wire::Ipv4Address;
-    // use smoltcp::wire::Ipv4Cidr;
-    use nb::block;
+
+    use smoltcp::iface::Interface;
+    use smoltcp::iface::Routes;
+    use smoltcp::phy::Device;
+
+    use smoltcp::socket::{Dhcpv4Event, Dhcpv4Socket};
+    use smoltcp::time::Duration;
+    use smoltcp::wire::Ipv4Address;
+    use smoltcp::wire::Ipv4Cidr;
+    use stm32f4xx_hal::dma::{StreamsTuple};
+    use stm32f4xx_hal::gpio::{Edge, Output};
+
     use systick_monotonic::Systick;
 
-    // use smoltcp::{
-    //     iface::{InterfaceBuilder, NeighborCache, SocketStorage},
-    //     time::Instant,
-    //     wire::{EthernetAddress, IpCidr},
-    // };
-    // use stm32f1xx_hal::{
-    //     gpio::{Edge, ExtiPin, PA0},
-    //     pac::USART3,
-    //     prelude::*,
-    //     serial::{Config, Serial, Tx},
-    // };
+    use smoltcp::{ iface::SocketStorage};
 
     use stm32f4xx_hal::{
-        gpio::{PinState, PA5, PB13, PB15, PB9, PC13, PC4, PC6},
+        gpio::{PinState, PA5, PC13, PC4},
         prelude::*,
     };
 
@@ -67,67 +58,82 @@ mod app {
     #[local]
     struct Local {
         led_pin: PA5<Output>,
-        spi: Option<Spi<SPI2, (PB13, NoPin, PB15), false, u8, Slave>>,
-        rx_stream: Option<Stream3<DMA1>>,
-        cs_pin: PB9<Input>,
         button_pin: PC13,
         out_pin: PC4<Output>,
-        // transmitter: Option<Transmitter>,
-        // receiver_idle: ReceiverMutex,
-        // receiver_cs_down: ReceiverMutex,
+        transmitter: Option<Transmitter>,
+        receiver_idle: ReceiverMutex,
+        receiver_cs_down: ReceiverMutex,
     }
 
     static BUTTON_PRESS_COUNT: AtomicUsize = AtomicUsize::new(0);
 
-    // #[init(local = [receiver: Mutex<RefCell<Option<Receiver>>> = Mutex::new(RefCell::new(None))])]
-    #[init(local = [])]
+    #[init(local = [receiver: Mutex<RefCell<Option<Receiver>>> = Mutex::new(RefCell::new(None))])]
     fn init(cx: init::Context) -> (Shared, Local, init::Monotonics) {
         let mut dp = cx.device;
 
         let rcc = dp.RCC.constrain();
-        let mut gpioc = dp.GPIOC.split();
+        let gpioa = dp.GPIOA.split();
+        let gpiob = dp.GPIOB.split();
+        let gpioc = dp.GPIOC.split();
 
-        let mut gpiob = dp.GPIOB.split();
-        let mut gpioa = dp.GPIOA.split();
-        let spi = dp.SPI2;
-
-        let clocks = rcc.cfgr.sysclk(40.MHz()).pclk1(20.MHz()).freeze();
+        let clocks = rcc.cfgr.sysclk(80.MHz()).pclk1(40.MHz()).freeze();
         let mut syscfg = dp.SYSCFG.constrain();
 
         let mono = Systick::new(cx.core.SYST, 40_000_000);
 
         let led_pin = gpioa.pa5.into_push_pull_output_in_state(PinState::High);
-        let cs_pin = gpiob.pb9.into_input();
         let mut button_pin = gpioc.pc13.into_input();
         button_pin.make_interrupt_source(&mut syscfg);
         button_pin.enable_interrupt(&mut dp.EXTI);
         button_pin.trigger_on_edge(&mut dp.EXTI, Edge::RisingFalling);
         let out_pin = gpioc.pc4.into_push_pull_output();
 
-        let sck = gpiob.pb13;
-        let mosi = gpiob.pb15;
-        let mut spi = Spi::new_slave(
-            spi,
-            (sck, NoMiso {}, mosi),
-            Mode {
-                polarity: Polarity::IdleLow,
-                phase: Phase::CaptureOnFirstTransition,
-            },
-            10_000_000.Hz(),
-            &clocks,
+        let pin_sck = gpiob.pb13;
+        let pin_mosi = gpiob.pb15;
+        let mut pin_cs = gpioc.pc6.into_input();
+        pin_cs.make_interrupt_source(&mut syscfg);
+        pin_cs.enable_interrupt(&mut dp.EXTI);
+        pin_cs.trigger_on_edge(&mut dp.EXTI, Edge::Rising);
+
+        let streams_dma1 = StreamsTuple::new(dp.DMA1);
+        let rx_stream = streams_dma1.3;
+
+        let rx_buf =
+            singleton!(: [u8; crate::receiver::BUFFER_LEN] = [0; crate::receiver::BUFFER_LEN])
+                .unwrap();
+        let receiver = Receiver::new(
+            dp.SPI2, pin_sck, pin_mosi, pin_cs, rx_stream, rx_buf, &clocks,
         );
-        spi.bit_format(BitFormat::LsbFirst);
-        let streams = StreamsTuple::new(dp.DMA1);
-        let rx_stream = streams.3;
+        interrupt::free(|cs| cx.local.receiver.borrow(cs).borrow_mut().replace(receiver));
+
+        let pin_tx_sck = gpioc.pc10.into_push_pull_output();
+        let pin_tx_mosi = gpioc.pc12.into_push_pull_output();
+        let pin_nlp_disa = gpiob.pb1.into_push_pull_output();
+
+        let tx_buf = singleton!(: [u8; crate::transmitter::BUFFER_LEN] = [0; crate::transmitter::BUFFER_LEN]).unwrap();
+        let tx_stream = streams_dma1.7;
+
+        let transmitter = Transmitter::new(
+            false,
+            false,
+            false,
+            dp.SPI3,
+            pin_tx_sck,
+            pin_tx_mosi,
+            pin_nlp_disa,
+            tx_stream,
+            clocks,
+            tx_buf,
+        );
         (
             Shared {},
             Local {
                 led_pin,
-                spi: Some(spi),
-                rx_stream: Some(rx_stream),
-                cs_pin,
                 button_pin,
                 out_pin,
+                receiver_idle: cx.local.receiver,
+                receiver_cs_down: cx.local.receiver,
+                transmitter: Some(transmitter),
             },
             init::Monotonics(mono),
         )
@@ -143,6 +149,7 @@ mod app {
                 out_pin.set_high();
                 led_pin.set_high();
             } else {
+                BUTTON_PRESS_COUNT.fetch_add(1, Ordering::SeqCst);
                 out_pin.set_low();
                 led_pin.set_low();
             }
@@ -150,78 +157,40 @@ mod app {
         }
     }
 
-    #[idle(local = [spi, rx_stream, cs_pin])]
+    #[idle(local = [receiver_idle, transmitter])]
     fn idle(ctx: idle::Context) -> ! {
         defmt::trace!("idle task started");
-        let mut spi = ctx.local.spi.take().unwrap();
-        let mut rx_buffer = cortex_m::singleton!(: [u8; 16] = [0; 16]).unwrap();
-        let mut rx_stream = ctx.local.rx_stream.take().unwrap();
-        let cs_pin = ctx.local.cs_pin;
-        loop {
-            (spi, rx_stream, rx_buffer) = {
-                spi.set_internal_nss(false);
-                let rx = spi.use_dma().rx();
-                let mut rx_transfer = Transfer::init_peripheral_to_memory(
-                    rx_stream,
-                    rx,
-                    rx_buffer,
-                    None,
-                    DmaConfig::default()
-                        .memory_increment(true),
-                );
-                rx_transfer.start(|_rx| {});
-                // defmt::info!("rxne = {}", spi.is_rx_not_empty());
-                while cs_pin.is_high() {}
-                while cs_pin.is_low() {}
-                // defmt::info!("rxne = {}", spi.is_rx_not_empty());
-                // match spi.check_read() {
-                //     Ok(b) => defmt::info!("read {}", b),
-                //     Err(e) => defmt::info!("error")
-                // }
-                let (stream, spi, buf, _) = rx_transfer.release();
-                let stream: Stream3<DMA1> = stream;
-                let ndtr = Stream3::<DMA1>::get_number_of_transfers() as usize;
-                defmt::info!("ndtr = {}", ndtr);
-                defmt::info!("data: {}", buf);
-                let mut spi = spi.release();
-                spi.set_internal_nss(true);
-                defmt::info!("rxne = {}", spi.is_rx_not_empty());
-                (spi, stream, buf)
-            }
+        let receiver = ctx.local.receiver_idle;
+        interrupt::free(|cs| {
+            receiver
+                .borrow(cs)
+                .borrow_mut()
+                .as_mut()
+                .unwrap()
+                .start_listen()
+        });
 
-            // defmt::trace!("Got data: {:02X}", r)
-        }
-        // let receiver = ctx.local.receiver_idle;
-        // interrupt::free(|cs| {
-        //     receiver
-        //         .borrow(cs)
-        //         .borrow_mut()
-        //         .as_mut()
-        //         .unwrap()
-        //         .start_listen()
-        // });
+        let device = SpiDevice::new(receiver, ctx.local.transmitter.take().unwrap());
+        let mut sockets = [SocketStorage::EMPTY; 2];
+        let mut neighbor_cache_storage = [None; 8];
+        let hwaddr = EthernetAddress([0x06, 0x22, 0x33, 0x44, 0x55, 0x66]);
+        let neighbor_cache = NeighborCache::new(&mut neighbor_cache_storage[..]);
+        let ip_addr = IpCidr::new(Ipv4Address::UNSPECIFIED.into(), 0);
+        let mut ip_addr_storage = [ip_addr; 1];
+        let mut routes_storage = [None; 2];
+        let routes = Routes::new(&mut routes_storage[..]);
 
-        // let device = SpiDevice::new(receiver, ctx.local.transmitter.take().unwrap());
-        // let mut sockets = [SocketStorage::EMPTY; 2];
-        // let mut neighbor_cache_storage = [None; 8];
-        // let hwaddr = EthernetAddress([0x06, 0x22, 0x33, 0x44, 0x55, 0x66]);
-        // let neighbor_cache = NeighborCache::new(&mut neighbor_cache_storage[..]);
-        // let ip_addr = IpCidr::new(Ipv4Address::UNSPECIFIED.into(), 0);
-        // let mut ip_addr_storage = [ip_addr; 1];
-        // let mut routes_storage = [None; 2];
-        // let routes = Routes::new(&mut routes_storage[..]);
+        let mut iface = InterfaceBuilder::new(device, &mut sockets[..])
+            .hardware_addr(hwaddr.into())
+            .neighbor_cache(neighbor_cache)
+            .ip_addrs(&mut ip_addr_storage[..])
+            .routes(routes)
+            .finalize();
 
-        // let mut iface = InterfaceBuilder::new(device, &mut sockets[..])
-        //     .hardware_addr(hwaddr.into())
-        //     .neighbor_cache(neighbor_cache)
-        //     .ip_addrs(&mut ip_addr_storage[..])
-        //     .routes(routes)
-        //     .finalize();
+        let mut dhcp_socket = Dhcpv4Socket::new();
+        dhcp_socket.set_max_lease_duration(Some(Duration::from_secs(86400)));
 
-        // let mut dhcp_socket = Dhcpv4Socket::new();
-        // dhcp_socket.set_max_lease_duration(Some(Duration::from_secs(86400)));
-
-        // let dhcp_handle = iface.add_socket(dhcp_socket);
+        let dhcp_handle = iface.add_socket(dhcp_socket);
 
         // let mut tcp_rx_buffer_storage = [0 as u8; 512];
         // let mut tcp_tx_buffer_storage = [0 as u8; 512];
@@ -230,53 +199,55 @@ mod app {
         // let tcp_socket = TcpSocket::new(tcp_rx_buffer, tcp_tx_buffer);
 
         // let tcp_handle = iface.add_socket(tcp_socket);
-        // loop {
-        //     defmt::info!("iteration");
-        //     let mut request_done = false;
-        //     // let mut buf = [0 as u8; 384];
-        //     // let mut buf_slice = Some(&mut buf[..]);
-        //     // let mut headers = [httparse::EMPTY_HEADER; 16];
-        //     // let mut req = httparse::Request::new(&mut headers);
+        loop {
+            defmt::info!("iteration");
+            let mut request_done = false;
+            //     // let mut buf = [0 as u8; 384];
+            //     // let mut buf_slice = Some(&mut buf[..]);
+            //     // let mut headers = [httparse::EMPTY_HEADER; 16];
+            //     // let mut req = httparse::Request::new(&mut headers);
 
-        //     while !request_done {
-        //         let now = Instant::from_millis(monotonics::now().ticks() as i64);
-        //         match iface.poll(now) {
-        //             Ok(_) => (),
-        //             Err(smoltcp::Error::Unrecognized) => (),
-        //             Err(e) => {
-        //                 defmt::error!("poll error {}", e);
-        //             }
-        //         };
+            while !request_done {
+                let now = Instant::from_millis(monotonics::now().ticks() as i64);
+                match iface.poll(now) {
+                    Ok(_) => (),
+                    Err(smoltcp::Error::Unrecognized) => (),
+                    Err(e) => {
+                        defmt::error!("poll error {}", e);
+                    }
+                };
 
-        //         let event = iface.get_socket::<Dhcpv4Socket>(dhcp_handle).poll();
-        //         match event {
-        //             None => {}
-        //             Some(Dhcpv4Event::Configured(config)) => {
-        //                 defmt::debug!("DHCP config acquired!");
+                let event = iface.get_socket::<Dhcpv4Socket>(dhcp_handle).poll();
+                match event {
+                    None => {}
+                    Some(Dhcpv4Event::Configured(config)) => {
+                        defmt::debug!("DHCP config acquired!");
 
-        //                 defmt::debug!("IP address:      {}", config.address);
-        //                 set_ipv4_addr(&mut iface, config.address);
+                        defmt::debug!("IP address:      {}", config.address);
+                        set_ipv4_addr(&mut iface, config.address);
 
-        //                 if let Some(router) = config.router {
-        //                     defmt::debug!("Default gateway: {}", router);
-        //                     iface.routes_mut().add_default_ipv4_route(router).unwrap();
-        //                 } else {
-        //                     defmt::debug!("Default gateway: None");
-        //                     iface.routes_mut().remove_default_ipv4_route();
-        //                 }
+                        if let Some(router) = config.router {
+                            defmt::debug!("Default gateway: {}", router);
+                            iface.routes_mut().add_default_ipv4_route(router).unwrap();
+                        } else {
+                            defmt::debug!("Default gateway: None");
+                            iface.routes_mut().remove_default_ipv4_route();
+                        }
 
-        //                 for (i, s) in config.dns_servers.iter().enumerate() {
-        //                     if let Some(s) = s {
-        //                         defmt::debug!("DNS server {}:    {}", i, s);
-        //                     }
-        //                 }
-        //             }
-        //             Some(Dhcpv4Event::Deconfigured) => {
-        //                 defmt::debug!("DHCP lost config!");
-        //                 set_ipv4_addr(&mut iface, Ipv4Cidr::new(Ipv4Address::UNSPECIFIED, 0));
-        //                 iface.routes_mut().remove_default_ipv4_route();
-        //             }
-        //         }
+                        for (i, s) in config.dns_servers.iter().enumerate() {
+                            if let Some(s) = s {
+                                defmt::debug!("DNS server {}:    {}", i, s);
+                            }
+                        }
+                    }
+                    Some(Dhcpv4Event::Deconfigured) => {
+                        defmt::debug!("DHCP lost config!");
+                        set_ipv4_addr(&mut iface, Ipv4Cidr::new(Ipv4Address::UNSPECIFIED, 0));
+                        iface.routes_mut().remove_default_ipv4_route();
+                    }
+                }
+            }
+        }
 
         //         // let socket = iface.get_socket::<TcpSocket>(tcp_handle);
         //         // if !socket.is_open() {
@@ -342,37 +313,37 @@ mod app {
         // }
     }
 
-    // #[task(binds = EXTI9_5, priority = 3, local = [receiver_cs_down])]
-    // fn task_cs_down(ctx: task_cs_down::Context) {
-    //     let receiver = ctx.local.receiver_cs_down;
+    #[task(binds = EXTI9_5, priority = 3, local = [receiver_cs_down])]
+    fn task_cs_up(ctx: task_cs_up::Context) {
+        let receiver = ctx.local.receiver_cs_down;
 
-    //     interrupt::free(|cs| {
-    //         let result = receiver
-    //             .borrow(cs)
-    //             .borrow_mut()
-    //             .as_mut()
-    //             .map(|r| {
-    //                 let result = r.on_frame_end();
-    //                 r.clear_cs_interrupt();
-    //                 result
-    //             })
-    //             .unwrap();
-    //         match result {
-    //             Ok(l) => defmt::info!("received {} bytes", l),
-    //             Err(e) => defmt::error!("frame error: {}", e),
-    //         };
-    //     });
-    // }
+        interrupt::free(|cs| {
+            let result = receiver
+                .borrow(cs)
+                .borrow_mut()
+                .as_mut()
+                .map(|r| {
+                    let result = r.on_frame_end();
+                    r.clear_cs_interrupt();
+                    result
+                })
+                .unwrap();
+            match result {
+                Ok(l) => defmt::info!("received {} bytes", l),
+                Err(e) => defmt::error!("frame error: {}", e),
+            };
+        });
+    }
 
-    // fn set_ipv4_addr<DeviceT>(iface: &mut Interface<'_, DeviceT>, cidr: Ipv4Cidr)
-    // where
-    //     DeviceT: for<'d> Device<'d>,
-    // {
-    //     iface.update_ip_addrs(|addrs| {
-    //         let dest = addrs.iter_mut().next().unwrap();
-    //         *dest = IpCidr::Ipv4(cidr);
-    //     });
-    // }
+    fn set_ipv4_addr<DeviceT>(iface: &mut Interface<'_, DeviceT>, cidr: Ipv4Cidr)
+    where
+        DeviceT: for<'d> Device<'d>,
+    {
+        iface.update_ip_addrs(|addrs| {
+            let dest = addrs.iter_mut().next().unwrap();
+            *dest = IpCidr::Ipv4(cidr);
+        });
+    }
 
     // fn write_response<W: core::fmt::Write>(socket: &mut W, path: &str) -> core::fmt::Result {
     //     let r = match path {

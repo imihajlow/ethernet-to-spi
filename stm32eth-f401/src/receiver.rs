@@ -13,8 +13,7 @@ use stm32f4xx_hal::{
 use replace_with::{replace_with, replace_with_and_return};
 
 pub const BUFFER_LEN: usize = 1600;
-const MIN_FRAME_LEN: usize = 8 + 2 * 6 + 2 + 4;
-const PREAMBLE: [u8; 8] = [0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0xd5];
+const MIN_FRAME_LEN: usize = 2 * 6 + 2 + 4;
 const CRC: Crc<u32> = Crc::<u32>::new(&CRC_32_ISO_HDLC);
 
 type PinCs = PC6;
@@ -122,7 +121,7 @@ impl Receiver {
             |s| {
                 match s {
                     Self::Idle(periph, buf) => {
-                        if periph.pin_cs.is_high() {
+                        if periph.pin_cs.is_low() {
                             // a frame is already being sent, we've missed it
                             Self::WaitFrameEnd(periph, buf)
                         } else {
@@ -151,26 +150,25 @@ impl Receiver {
                 |s| {
                     match s {
                         Self::Listen(transfer, pin_cs) => {
-                            let (stream, ret_rx, ret_buf, _) = transfer.release();
+                            let (stream, ret_rx, mut ret_buf, _) = transfer.release();
                             let mut spi = ret_rx.release();
                             spi.set_internal_nss(true);
                             let stream: DmaStream = stream; // ensure type
                             let ndtr = DmaStream::get_number_of_transfers() as usize;
                             let len = ret_buf.len() - ndtr;
+                            defmt::info!("got {:X}", ret_buf[0..len]);
                             let result = if len < MIN_FRAME_LEN {
                                 Err(FrameError::InvalidLength(len))
                             } else {
-                                if ret_buf[0..8] != PREAMBLE {
-                                    Err(FrameError::InvalidPreamble)
+                                // first SCK edge comes after MOSI/Manchester transition
+                                ret_buf[0] = ret_buf[0] ^ 0x01;
+                                let mut digest = CRC.digest();
+                                digest.update(&ret_buf[0..len - 4]);
+                                let fcs = digest.finalize().to_le_bytes();
+                                if ret_buf[len - 4..len] == fcs {
+                                    Ok(len)
                                 } else {
-                                    let mut digest = CRC.digest();
-                                    digest.update(&ret_buf[8..len - 4]);
-                                    let fcs = digest.finalize().to_le_bytes();
-                                    if ret_buf[len - 4..len] == fcs {
-                                        Ok(len)
-                                    } else {
-                                        Err(FrameError::InvalidFcs)
-                                    }
+                                    Err(FrameError::InvalidFcs)
                                 }
                             };
 

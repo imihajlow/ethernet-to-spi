@@ -16,6 +16,7 @@ defmt-rtt = "0.4"
 systick-monotonic = "1"
 cortex-m-rtic = ">=1.1"
 crc = "2"
+embedded-dma = ">=0.2"
 
 [dependencies.defmt]
 version = "0.3"
@@ -27,4 +28,13 @@ features = ["stm32f401"]
 
 [dependencies.replace_with]
 version = "0.1.7"
+default-features = false
+
+[dependencies.smoltcp]
+version = "0.8"
+default-features = false
+features = ["proto-ipv4", "socket-udp", "socket-icmp", "socket-tcp", "socket-dhcpv4", "medium-ethernet", "defmt"]
+
+[dependencies.httparse]
+version = "1.8"
 default-features = false
