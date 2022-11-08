@@ -139,10 +139,14 @@ impl Receiver {
         )
     }
 
-    pub fn on_frame_end(&mut self) -> Result<usize, FrameError> {
+    pub fn on_edge_maybe(&mut self) -> Option<Result<usize, FrameError>> {
+        let is_low = self.clear_cs_interrupt_and_return_true_if_still_low();
+        if is_low {
+            return None;
+        }
         if let Self::WaitFrameEnd(_, _) = self {
             self.start_listen();
-            Err(FrameError::StartListen)
+            Some(Err(FrameError::StartListen))
         } else {
             let result = replace_with_and_return(
                 self,
@@ -156,19 +160,27 @@ impl Receiver {
                             let stream: DmaStream = stream; // ensure type
                             let ndtr = DmaStream::get_number_of_transfers() as usize;
                             let len = ret_buf.len() - ndtr;
-                            defmt::info!("got {:X}", ret_buf[0..len]);
+                            defmt::info!("got {:02X}", ret_buf[0..len]);
                             let result = if len < MIN_FRAME_LEN {
                                 Err(FrameError::InvalidLength(len))
                             } else {
-                                // first SCK edge comes after MOSI/Manchester transition
-                                ret_buf[0] = ret_buf[0] ^ 0x01;
                                 let mut digest = CRC.digest();
                                 digest.update(&ret_buf[0..len - 4]);
                                 let fcs = digest.finalize().to_le_bytes();
                                 if ret_buf[len - 4..len] == fcs {
                                     Ok(len)
                                 } else {
-                                    Err(FrameError::InvalidFcs)
+                                    // try flipping the first bit
+                                    // first SCK edge comes after MOSI/Manchester transition
+                                    ret_buf[0] = ret_buf[0] ^ 0x01;
+                                    let mut digest = CRC.digest();
+                                    digest.update(&ret_buf[0..len - 4]);
+                                    let fcs = digest.finalize().to_le_bytes();
+                                    if ret_buf[len - 4..len] == fcs {
+                                        Ok(len)
+                                    } else {
+                                        Err(FrameError::InvalidFcs)
+                                    }
                                 }
                             };
 
@@ -191,23 +203,25 @@ impl Receiver {
             if let Self::Idle(_, _) = self {
                 self.start_listen()
             }
-            result
+            Some(result)
         }
     }
 
-    pub fn clear_cs_interrupt(&mut self) {
+    fn clear_cs_interrupt_and_return_true_if_still_low(&mut self) -> bool {
         match self {
             Self::Idle(periph, _)
             | Self::WaitFrameEnd(periph, _)
             | Self::Data(periph, _, _)
             | Self::Process(periph) => {
                 periph.pin_cs.clear_interrupt_pending_bit();
+                periph.pin_cs.is_low()
             }
             Self::Listen(_, pin_cs) => {
                 pin_cs.clear_interrupt_pending_bit();
+                pin_cs.is_low()
             }
-            Self::Invalid => (),
-        };
+            Self::Invalid => false,
+        }
     }
 
     fn get_state_name(&self) -> &'static str {

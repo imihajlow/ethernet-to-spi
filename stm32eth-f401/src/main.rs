@@ -62,7 +62,7 @@ mod app {
         out_pin: PC4<Output>,
         transmitter: Option<Transmitter>,
         receiver_idle: ReceiverMutex,
-        receiver_cs_down: ReceiverMutex,
+        receiver_cs_up: ReceiverMutex,
     }
 
     static BUTTON_PRESS_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -90,7 +90,7 @@ mod app {
 
         let pin_sck = gpiob.pb13;
         let pin_mosi = gpiob.pb15;
-        let mut pin_cs = gpioc.pc6.into_input();
+        let mut pin_cs = gpioc.pc6.into_pull_down_input();
         pin_cs.make_interrupt_source(&mut syscfg);
         pin_cs.enable_interrupt(&mut dp.EXTI);
         pin_cs.trigger_on_edge(&mut dp.EXTI, Edge::Rising);
@@ -132,7 +132,7 @@ mod app {
                 button_pin,
                 out_pin,
                 receiver_idle: cx.local.receiver,
-                receiver_cs_down: cx.local.receiver,
+                receiver_cs_up: cx.local.receiver,
                 transmitter: Some(transmitter),
             },
             init::Monotonics(mono),
@@ -313,9 +313,9 @@ mod app {
         // }
     }
 
-    #[task(binds = EXTI9_5, priority = 3, local = [receiver_cs_down])]
+    #[task(binds = EXTI9_5, priority = 3, local = [receiver_cs_up])]
     fn task_cs_up(ctx: task_cs_up::Context) {
-        let receiver = ctx.local.receiver_cs_down;
+        let receiver = ctx.local.receiver_cs_up;
 
         interrupt::free(|cs| {
             let result = receiver
@@ -323,15 +323,16 @@ mod app {
                 .borrow_mut()
                 .as_mut()
                 .map(|r| {
-                    let result = r.on_frame_end();
-                    r.clear_cs_interrupt();
+                    let result = r.on_edge_maybe();
                     result
                 })
                 .unwrap();
-            match result {
-                Ok(l) => defmt::info!("received {} bytes", l),
-                Err(e) => defmt::error!("frame error: {}", e),
-            };
+            if let Some(result) = result {
+                match result {
+                    Ok(l) => defmt::info!("received {} bytes", l),
+                    Err(e) => defmt::error!("frame error: {}", e),
+                }
+            }
         });
     }
 
