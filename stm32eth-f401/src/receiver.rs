@@ -1,6 +1,7 @@
-use core::fmt;
 use crc::{Crc, CRC_32_ISO_HDLC};
 use defmt::Format;
+use heapless::spsc::Queue;
+use cortex_m::asm;
 use stm32f4xx_hal::{
     dma::{self, config::DmaConfig, traits::Stream},
     gpio::{ExtiPin, NoPin, PB13, PB15, PC6},
@@ -13,6 +14,7 @@ use stm32f4xx_hal::{
 use replace_with::{replace_with, replace_with_and_return};
 
 pub const BUFFER_LEN: usize = 1600;
+pub const MAX_BUFFERS: usize = 4;
 const MIN_FRAME_LEN: usize = 2 * 6 + 2 + 4;
 const CRC: Crc<u32> = Crc::<u32>::new(&CRC_32_ISO_HDLC);
 
@@ -38,13 +40,25 @@ type Transfer = dma::Transfer<
     RxBuf,
 >;
 
-pub enum Receiver {
-    Idle(SpiRxPeriph, RxBuf),
-    WaitFrameEnd(SpiRxPeriph, RxBuf),
+pub struct Receiver {
+    vacant_buffers: Queue<RxBuf, MAX_BUFFERS>,
+    received_frames: Queue<(RxBuf, usize), MAX_BUFFERS>,
+    state: ReceiverState,
+    stats: Stats,
+}
+
+enum ReceiverState {
+    Idle(SpiRxPeriph),
     Listen(Transfer, PinCs),
-    Data(SpiRxPeriph, RxBuf, usize),
-    Process(SpiRxPeriph),
-    Invalid,
+}
+
+#[derive(Default)]
+struct Stats {
+    flipped: usize,
+    missed: usize,
+    received: usize,
+    bad_fcs: usize,
+    iteration: usize,
 }
 
 #[derive(Format)]
@@ -52,8 +66,7 @@ pub enum FrameError {
     InvalidLength(usize),
     InvalidFcs,
     InvalidPreamble,
-    InvalidState(&'static str),
-    StartListen,
+    Missed,
 }
 
 impl Receiver {
@@ -63,7 +76,7 @@ impl Receiver {
         pin_mosi: PinMosi,
         pin_cs: PinCs,
         dma_stream: dma::Stream3<DMA1>,
-        buf: RxBuf,
+        buffers: [RxBuf; MAX_BUFFERS],
         clocks: &Clocks,
     ) -> Self {
         let mut spi = Spi::new_slave(
@@ -78,160 +91,168 @@ impl Receiver {
         );
         spi.bit_format(BitFormat::LsbFirst);
         spi.set_internal_nss(true);
-        Self::Idle(
-            SpiRxPeriph {
+        let mut vacant_buffers = Queue::new();
+        for buf in buffers.into_iter() {
+            vacant_buffers.enqueue(buf).ok();
+        }
+        Self {
+            vacant_buffers,
+            received_frames: Queue::new(),
+            state: ReceiverState::Idle(SpiRxPeriph {
                 spi,
                 pin_cs,
                 dma_stream,
-            },
-            buf,
-        )
+            }),
+            stats: Default::default(),
+        }
     }
 
     pub fn try_get_data(&mut self) -> Option<(RxBuf, usize)> {
-        replace_with_and_return(
-            self,
-            || Self::Invalid,
-            |s| match s {
-                Self::Data(periph, buf, len) => (Some((buf, len)), Self::Process(periph)),
-                _ => (None, s),
-            },
-        )
+        self.received_frames.dequeue()
     }
 
     pub fn return_buffer(&mut self, buf: RxBuf) {
-        replace_with(
-            self,
-            || Self::Invalid,
-            |s| {
-                if let Self::Process(periph) = s {
-                    Self::Idle(periph, buf)
-                } else {
-                    Self::Invalid
-                }
-            },
-        );
+        self.vacant_buffers.enqueue(buf).ok();
         self.start_listen();
     }
 
     pub fn start_listen(&mut self) {
         replace_with(
-            self,
-            || Self::Invalid,
-            |s| {
-                match s {
-                    Self::Idle(periph, buf) => {
-                        if periph.pin_cs.is_low() {
-                            // a frame is already being sent, we've missed it
-                            Self::WaitFrameEnd(periph, buf)
-                        } else {
+            &mut self.state,
+            || panic!(),
+            |state| match state {
+                ReceiverState::Idle(periph) => {
+                    if periph.pin_cs.is_low() {
+                        // a frame is already being sent, we've missed it
+                        ReceiverState::Idle(periph)
+                    } else {
+                        if let Some(buf) = self.vacant_buffers.dequeue() {
                             let (transfer, pin_cs) = create_dma_transfer(periph, buf);
-                            Self::Listen(transfer, pin_cs)
+                            ReceiverState::Listen(transfer, pin_cs)
+                        } else {
+                            ReceiverState::Idle(periph)
                         }
                     }
-                    Self::WaitFrameEnd(periph, buf) => {
-                        let (transfer, pin_cs) = create_dma_transfer(periph, buf);
-                        Self::Listen(transfer, pin_cs)
-                    }
-                    _ => Self::Invalid,
                 }
+                s => s,
             },
-        )
+        );
     }
 
     pub fn on_edge_maybe(&mut self) -> Option<Result<usize, FrameError>> {
         let is_low = self.clear_cs_interrupt_and_return_true_if_still_low();
         if is_low {
+            defmt::info!("still low");
             return None;
         }
-        if let Self::WaitFrameEnd(_, _) = self {
-            self.start_listen();
-            Some(Err(FrameError::StartListen))
-        } else {
-            let result = replace_with_and_return(
-                self,
-                || Self::Invalid,
-                |s| {
-                    match s {
-                        Self::Listen(transfer, pin_cs) => {
-                            let (stream, ret_rx, mut ret_buf, _) = transfer.release();
-                            let mut spi = ret_rx.release();
-                            spi.set_internal_nss(true);
-                            let stream: DmaStream = stream; // ensure type
-                            let ndtr = DmaStream::get_number_of_transfers() as usize;
-                            let len = ret_buf.len() - ndtr;
-                            defmt::info!("got {:02X}", ret_buf[0..len]);
-                            let result = if len < MIN_FRAME_LEN {
-                                Err(FrameError::InvalidLength(len))
+        let result = replace_with_and_return(
+            &mut self.state,
+            || panic!(),
+            |state| match state {
+                ReceiverState::Listen(transfer, pin_cs) => {
+                    let (stream, ret_rx, mut ret_buf, _) = transfer.release();
+                    let mut spi = ret_rx.release();
+                    spi.set_internal_nss(true);
+                    let stream: DmaStream = stream; // ensure type
+                    let ndtr = DmaStream::get_number_of_transfers() as usize;
+                    let len = ret_buf.len() - ndtr;
+                    defmt::info!("got {:02X}", ret_buf[0..len]);
+                    let result = if len < MIN_FRAME_LEN {
+                        Err(FrameError::InvalidLength(len))
+                    } else {
+                        let mut digest = CRC.digest();
+                        digest.update(&ret_buf[0..len - 4]);
+                        let fcs = digest.finalize().to_le_bytes();
+                        if ret_buf[len - 4..len] == fcs {
+                            Ok(len)
+                        } else {
+                            // try flipping the first bit
+                            // first SCK edge comes after MOSI/Manchester transition
+                            self.stats.count_flip();
+                            ret_buf[0] = ret_buf[0] ^ 0x01;
+                            let mut digest = CRC.digest();
+                            digest.update(&ret_buf[0..len - 4]);
+                            let fcs = digest.finalize().to_le_bytes();
+                            if ret_buf[len - 4..len] == fcs {
+                                Ok(len)
                             } else {
-                                let mut digest = CRC.digest();
-                                digest.update(&ret_buf[0..len - 4]);
-                                let fcs = digest.finalize().to_le_bytes();
-                                if ret_buf[len - 4..len] == fcs {
-                                    Ok(len)
-                                } else {
-                                    // try flipping the first bit
-                                    // first SCK edge comes after MOSI/Manchester transition
-                                    ret_buf[0] = ret_buf[0] ^ 0x01;
-                                    let mut digest = CRC.digest();
-                                    digest.update(&ret_buf[0..len - 4]);
-                                    let fcs = digest.finalize().to_le_bytes();
-                                    if ret_buf[len - 4..len] == fcs {
-                                        Ok(len)
-                                    } else {
-                                        Err(FrameError::InvalidFcs)
-                                    }
-                                }
-                            };
-
-                            // release SPI to reset it (in case there's an incomplete byte in the register)
-                            let periph = SpiRxPeriph {
-                                spi,
-                                dma_stream: stream,
-                                pin_cs,
-                            };
-                            if result.is_ok() {
-                                (result, Self::Data(periph, ret_buf, len))
-                            } else {
-                                (result, Self::Idle(periph, ret_buf))
+                                Err(FrameError::InvalidFcs)
                             }
                         }
-                        _ => (Err(FrameError::InvalidState(s.get_state_name())), s),
+                    };
+
+                    // release SPI to reset it (in case there's an incomplete byte in the register)
+                    let periph = SpiRxPeriph {
+                        spi,
+                        dma_stream: stream,
+                        pin_cs,
+                    };
+
+                    if result.is_ok() {
+                        self.stats.count_good();
+                        self.received_frames.enqueue((ret_buf, len)).ok();
+                    } else {
+                        self.stats.count_bad_fcs();
+                        self.vacant_buffers.enqueue(ret_buf).ok();
                     }
-                },
-            );
-            if let Self::Idle(_, _) = self {
-                self.start_listen()
-            }
-            Some(result)
+                    (Some(result), ReceiverState::Idle(periph))
+                }
+                ReceiverState::Idle(_) => {
+                    self.stats.count_miss();
+                    (Some(Err(FrameError::Missed)), state)
+                }
+            },
+        );
+        if let ReceiverState::Idle(_) = self.state {
+            self.start_listen();
         }
+        self.stats.dump();
+        result
     }
 
     fn clear_cs_interrupt_and_return_true_if_still_low(&mut self) -> bool {
-        match self {
-            Self::Idle(periph, _)
-            | Self::WaitFrameEnd(periph, _)
-            | Self::Data(periph, _, _)
-            | Self::Process(periph) => {
+        asm::delay(150);
+        match &mut self.state {
+            ReceiverState::Idle(periph) => {
                 periph.pin_cs.clear_interrupt_pending_bit();
                 periph.pin_cs.is_low()
             }
-            Self::Listen(_, pin_cs) => {
+            ReceiverState::Listen(_, pin_cs) => {
                 pin_cs.clear_interrupt_pending_bit();
                 pin_cs.is_low()
             }
-            Self::Invalid => false,
         }
     }
+}
 
-    fn get_state_name(&self) -> &'static str {
-        match self {
-            Receiver::Idle(_, _) => "Idle",
-            Receiver::WaitFrameEnd(_, _) => "WaitFrameEnd",
-            Receiver::Listen(_, _) => "Listen",
-            Receiver::Data(_, _, _) => "Data",
-            Receiver::Process(_) => "Process",
-            Receiver::Invalid => "Invalid",
+impl Stats {
+    fn count_miss(&mut self) {
+        self.missed += 1;
+    }
+
+    fn count_flip(&mut self) {
+        self.flipped += 1;
+    }
+
+    fn count_good(&mut self) {
+        self.received += 1;
+    }
+
+    fn count_bad_fcs(&mut self) {
+        self.bad_fcs += 1;
+    }
+
+    fn dump(&mut self) {
+        self.iteration += 1;
+        if self.iteration == 10 {
+            defmt::info!(
+                "Good: {}, bad FCS: {}, missed: {}, flipped: {}",
+                self.received,
+                self.bad_fcs,
+                self.missed,
+                self.flipped
+            );
+            self.iteration = 0;
         }
     }
 }
@@ -250,29 +271,4 @@ fn create_dma_transfer(periph: SpiRxPeriph, buf: RxBuf) -> (Transfer, PinCs) {
     transfer.start(|_rx| {});
 
     (transfer, periph.pin_cs)
-}
-
-impl fmt::Display for Receiver {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Idle(_, _) => f.write_str("Idle"),
-            Self::WaitFrameEnd(_, _) => f.write_str("WaitFrameEnd"),
-            Self::Listen(_, _) => f.write_str("Listen"),
-            Self::Data(_, _, _) => f.write_str("Data"),
-            Self::Process(_) => f.write_str("Process"),
-            Self::Invalid => f.write_str("Invalid"),
-        }
-    }
-}
-
-impl fmt::Display for FrameError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            FrameError::InvalidLength(l) => write!(f, "invalid length: {}", l),
-            FrameError::InvalidFcs => f.write_str("invalid FCS"),
-            FrameError::InvalidState(s) => write!(f, "invalid state {}", s),
-            FrameError::InvalidPreamble => f.write_str("wrong preamble"),
-            FrameError::StartListen => f.write_str("last frame dropped"),
-        }
-    }
 }

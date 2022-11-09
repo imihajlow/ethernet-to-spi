@@ -38,3 +38,6 @@ features = ["proto-ipv4", "socket-udp", "socket-icmp", "socket-tcp", "socket-dhc
 [dependencies.httparse]
 version = "1.8"
 default-features = false
+
+[dependencies.heapless]
+version = "0.7"

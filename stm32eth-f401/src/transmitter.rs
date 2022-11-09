@@ -57,9 +57,9 @@ impl Transmitter {
         nlp_disa.set_low();
 
         if invert_idle {
-            sck.set_low();
-        } else {
             sck.set_high();
+        } else {
+            sck.set_low();
         }
         mosi.set_low();
         Self::Idle {
@@ -139,12 +139,12 @@ impl Transmitter {
 
                     let (spi, (sck, _, mosi)) = spi.release();
                     periph.spi = spi;
-                    periph.sck = sck;
-                    periph.mosi = mosi;
+                    periph.sck = sck.into_pull_down_input().into_push_pull_output();
+                    periph.mosi = mosi.into_pull_down_input().into_push_pull_output();
                     if invert_idle {
-                        periph.sck.set_low();
-                    } else {
                         periph.sck.set_high();
+                    } else {
+                        periph.sck.set_low();
                     }
                     periph.mosi.set_low();
 

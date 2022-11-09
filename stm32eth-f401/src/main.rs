@@ -33,12 +33,12 @@ mod app {
     use smoltcp::time::Duration;
     use smoltcp::wire::Ipv4Address;
     use smoltcp::wire::Ipv4Cidr;
-    use stm32f4xx_hal::dma::{StreamsTuple};
+    use stm32f4xx_hal::dma::StreamsTuple;
     use stm32f4xx_hal::gpio::{Edge, Output};
 
     use systick_monotonic::Systick;
 
-    use smoltcp::{ iface::SocketStorage};
+    use smoltcp::iface::SocketStorage;
 
     use stm32f4xx_hal::{
         gpio::{PinState, PA5, PC13, PC4},
@@ -98,11 +98,18 @@ mod app {
         let streams_dma1 = StreamsTuple::new(dp.DMA1);
         let rx_stream = streams_dma1.3;
 
-        let rx_buf =
+        let rx_bufs = [
             singleton!(: [u8; crate::receiver::BUFFER_LEN] = [0; crate::receiver::BUFFER_LEN])
-                .unwrap();
+                .unwrap(),
+            singleton!(: [u8; crate::receiver::BUFFER_LEN] = [0; crate::receiver::BUFFER_LEN])
+                .unwrap(),
+            singleton!(: [u8; crate::receiver::BUFFER_LEN] = [0; crate::receiver::BUFFER_LEN])
+                .unwrap(),
+            singleton!(: [u8; crate::receiver::BUFFER_LEN] = [0; crate::receiver::BUFFER_LEN])
+                .unwrap(),
+        ];
         let receiver = Receiver::new(
-            dp.SPI2, pin_sck, pin_mosi, pin_cs, rx_stream, rx_buf, &clocks,
+            dp.SPI2, pin_sck, pin_mosi, pin_cs, rx_stream, rx_bufs, &clocks,
         );
         interrupt::free(|cs| cx.local.receiver.borrow(cs).borrow_mut().replace(receiver));
 
@@ -114,7 +121,7 @@ mod app {
         let tx_stream = streams_dma1.7;
 
         let transmitter = Transmitter::new(
-            false,
+            true,
             false,
             false,
             dp.SPI3,
