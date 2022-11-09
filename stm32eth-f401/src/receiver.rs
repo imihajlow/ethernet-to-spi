@@ -142,7 +142,7 @@ impl Receiver {
     pub fn on_edge_maybe(&mut self) -> Option<Result<usize, FrameError>> {
         let is_low = self.clear_cs_interrupt_and_return_true_if_still_low();
         if is_low {
-            defmt::info!("still low");
+            // defmt::info!("still low");
             return None;
         }
         let result = replace_with_and_return(
@@ -156,7 +156,7 @@ impl Receiver {
                     let stream: DmaStream = stream; // ensure type
                     let ndtr = DmaStream::get_number_of_transfers() as usize;
                     let len = ret_buf.len() - ndtr;
-                    defmt::info!("got {:02X}", ret_buf[0..len]);
+                    // defmt::info!("got {:02X}", ret_buf[0..len]);
                     let result = if len < MIN_FRAME_LEN {
                         Err(FrameError::InvalidLength(len))
                     } else {
