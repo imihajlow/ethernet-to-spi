@@ -11,12 +11,11 @@
         const req = new XMLHttpRequest();
         req.onload = (e) => {
             document.getElementById('press_count').innerText = req.responseText;
-            setTimeout(updateLabel, 500);
         }
         req.open("GET", "/button.txt");
         req.send();
     }
 
-    setTimeout(updateLabel, 500);
+    setInterval(updateLabel, 500);
 </script>
 </html>

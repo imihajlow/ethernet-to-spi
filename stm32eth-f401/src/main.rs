@@ -113,21 +113,19 @@ mod app {
 
         let pin_tx_sck = gpioc.pc10.into_push_pull_output();
         let pin_tx_mosi = gpioc.pc12.into_push_pull_output();
-        let pin_nlp_disa = gpiob.pb1.into_push_pull_output();
 
         let tx_buf = singleton!(: [u8; crate::transmitter::BUFFER_LEN] = [0; crate::transmitter::BUFFER_LEN]).unwrap();
         let tx_stream = streams_dma1.7;
 
         let transmitter = Transmitter::new(
-            true,
+            false,
             false,
             false,
             dp.SPI3,
             pin_tx_sck,
             pin_tx_mosi,
-            pin_nlp_disa,
             tx_stream,
-            clocks,
+            &clocks,
             tx_buf,
         );
         (

@@ -1,12 +1,12 @@
-use cortex_m::asm;
+
 use replace_with::replace_with_and_return;
 use stm32f4xx_hal::{
-    gpio::{Output, PC10, PC12, PB1},
-    pac::{SPI3, DMA1},
+    dma::{config, Stream7, Transfer},
+    gpio::{Output, PC10, PC12},
+    pac::{DMA1, SPI3},
     prelude::*,
     rcc::Clocks,
     spi::{BitFormat, Mode, NoMiso, Phase, Polarity, Spi},
-    dma::{Transfer, config, Stream7},
 };
 
 use crate::tx_frame_buf::TxFrameBuf;
@@ -18,27 +18,22 @@ pub type TxBuf = &'static mut [u8; BUFFER_LEN];
 
 type PinSck = PC10<Output>;
 type PinMosi = PC12<Output>;
-type PinNlpDisa = PB1<Output>;
 type DmaStream = Stream7<DMA1>;
 
 pub struct SpiTxPeriph {
     spi: SPI3,
     sck: PinSck,
     mosi: PinMosi,
-    nlp_disa: PinNlpDisa,
-    dma_stream: DmaStream,
     clocks: Clocks,
 }
 
-pub enum Transmitter {
-    Idle {
-        periph: SpiTxPeriph,
-        buf: TxBuf,
-        invert_idle: bool,
-        invert_data: bool,
-        invert_sck_pol: bool,
-    },
-    Invalid,
+pub struct Transmitter {
+    spi: Spi<SPI3, (PinSck, NoMiso, PinMosi), false>,
+    dma_stream: DmaStream,
+    buf: TxBuf,
+    invert_idle: bool,
+    invert_data: bool,
+    invert_sck_pol: bool,
 }
 
 impl Transmitter {
@@ -49,28 +44,25 @@ impl Transmitter {
         spi: SPI3,
         mut sck: PinSck,
         mut mosi: PinMosi,
-        mut nlp_disa: PinNlpDisa,
         dma_stream: DmaStream,
-        clocks: Clocks,
+        clocks: &Clocks,
         buf: TxBuf,
     ) -> Self {
-        nlp_disa.set_low();
-
         if invert_idle {
             sck.set_high();
         } else {
             sck.set_low();
         }
         mosi.set_low();
-        Self::Idle {
-            periph: SpiTxPeriph {
-                spi,
-                sck,
-                mosi,
-                nlp_disa,
-                dma_stream,
-                clocks,
-            },
+        let mode = Mode {
+            polarity: Polarity::IdleLow,
+            phase: Phase::CaptureOnSecondTransition,
+        };
+        let mut spi = Spi::new(spi, (sck, NoMiso {}, mosi), mode, 10.MHz(), clocks);
+        spi.bit_format(BitFormat::LsbFirst);
+        Self {
+            spi,
+            dma_stream,
             buf,
             invert_idle,
             invert_data,
@@ -84,84 +76,47 @@ impl Transmitter {
     {
         replace_with_and_return(
             self,
-            || Self::Invalid,
+            || panic!(),
             |s| {
-                if let Self::Idle {
-                    mut periph,
+                let Self {
+                    spi,
+                    dma_stream,
                     buf,
                     invert_idle,
                     invert_data,
                     invert_sck_pol,
-                } = s
-                {
-                    periph.nlp_disa.set_high();
+                } = s;
+                let (frame_buf, result) = TxFrameBuf::new_with_fn(buf, len, f, invert_data);
 
-                    let (frame_buf, result) = TxFrameBuf::new_with_fn(buf, len, f, invert_data);
+                let dma_tx = spi.use_dma().tx();
+                let mut transfer = Transfer::init_memory_to_peripheral(
+                    dma_stream,
+                    dma_tx,
+                    frame_buf,
+                    None,
+                    config::DmaConfig::default().memory_increment(true),
+                );
 
-                    let mode = Mode {
-                        polarity: if invert_sck_pol {
-                            Polarity::IdleHigh
-                        } else {
-                            Polarity::IdleLow
-                        },
-                        phase: Phase::CaptureOnFirstTransition,
-                        // phase: Phase::CaptureOnSecondTransition,
-                    };
-                    let mut spi1 = Spi::new(
-                        periph.spi,
-                        (periph.sck, NoMiso {}, periph.mosi),
-                        mode,
-                        10.MHz(),
-                        &periph.clocks,
-                    );
-                    spi1.bit_format(BitFormat::LsbFirst);
-                    let dma_tx = spi1.use_dma().tx();
-                    let mut transfer = Transfer::init_memory_to_peripheral(
-                        periph.dma_stream,
-                        dma_tx,
-                        frame_buf,
-                        None,
-                        config::DmaConfig::default().memory_increment(true),
-                    );
+                transfer.start(|_tx| {});
 
-                    transfer.start(|_tx| {});
+                transfer.wait();
 
-                    transfer.wait();
+                let (dma_stream, tx, buf, _) = transfer.release();
+                let spi = tx.release();
 
-                    let (stream, tx, buf, _) = transfer.release();
-                    let spi = tx.release();
+                while spi.is_busy() {}
 
-                    periph.dma_stream = stream;
-
-                    while spi.is_busy() {}
-
-                    asm::delay(400);
-
-                    let (spi, (sck, _, mosi)) = spi.release();
-                    periph.spi = spi;
-                    periph.sck = sck.into_pull_down_input().into_push_pull_output();
-                    periph.mosi = mosi.into_pull_down_input().into_push_pull_output();
-                    if invert_idle {
-                        periph.sck.set_high();
-                    } else {
-                        periph.sck.set_low();
-                    }
-                    periph.mosi.set_low();
-
-                    periph.nlp_disa.set_low();
-                    (
-                        Some(result),
-                        Self::Idle {
-                            periph,
-                            buf: buf.release(),
-                            invert_idle,
-                            invert_data,
-                            invert_sck_pol,
-                        },
-                    )
-                } else {
-                    (None, s)
-                }
+                (
+                    Some(result),
+                    Self {
+                        spi,
+                        dma_stream,
+                        buf: buf.release(),
+                        invert_idle,
+                        invert_data,
+                        invert_sck_pol,
+                    },
+                )
             },
         )
     }
