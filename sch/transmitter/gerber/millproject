@@ -1,0 +1,38 @@
+metric=true
+metricoutput=true
+nog64=true
+
+front=transmitter-F_Cu.gbr
+outline=transmitter-Edge_Cuts.gbr
+drill=transmitter.drl
+
+front-output=front.gc
+outline-output=outline.gc
+drill-output=drill.gc
+milldrill-output=milldrill.gc
+
+# engraving
+zwork=-0.2
+mill-infeed=0.2
+zsafe=2
+mill-feed=250
+mill-speed=10000
+offset=0.15
+extra-passes=1
+
+# outline
+cutter-diameter=2
+zcut=-0.8
+cut-feed=300
+cut-speed=10000
+cut-infeed=0.2
+fill-outline=true
+
+# drill
+zdrill=-1
+zchange=8
+drill-feed=50
+drill-speed=10000
+min-milldrill-hole-diameter=2.0mm
+nog81=true
+drills-available=0.3mm,0.4mm,0.5mm,0.6mm,0.7mm,0.8mm,0.9mm,1.0mm,1.1mm,1.2mm,1.7mm:0.1mm

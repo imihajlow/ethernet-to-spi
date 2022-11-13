@@ -1,0 +1,14 @@
+/* https://wavedrom.com/editor.html */
+{signal: [
+  {name: "SCK", wave: "0..101010101010.|..", node: "..............a"},
+  {name: "MOSI", wave: "x..2.2.2.2.2.2.x|..", data: "1 0 1 0 1 1"},
+  {name: "xor", wave: "x..01.0.1.0.101x|.."},
+  {name: "driver input", wave: "x..01.0.1.0.101x|1x"},
+  {name: "driver ena", wave: "0..1...........0|10", node: "...............b"},
+  {name: "output", wave: "z..01.0.1.0.101z|1z"},
+],
+  config: {hscale: 1},
+  edge: ["a~b 100nS"],
+  head: {text: "Ethernet encoder"}
+}
+
