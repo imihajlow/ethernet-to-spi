@@ -1,0 +1,3 @@
+(fp_lib_table
+  (lib (name "schield")(type "KiCad")(uri "${KIPRJMOD}/schield.pretty")(options "")(descr ""))
+)

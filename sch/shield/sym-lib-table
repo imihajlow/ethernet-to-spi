@@ -1,0 +1,4 @@
+(sym_lib_table
+  (lib (name "shield")(type "KiCad")(uri "${KIPRJMOD}/shield.kicad_sym")(options "")(descr ""))
+  (lib (name "eth")(type "KiCad")(uri "${KIPRJMOD}/../ethernet-to-spi/eth.kicad_sym")(options "")(descr ""))
+)
