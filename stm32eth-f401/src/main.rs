@@ -1,9 +1,12 @@
 #![no_std]
 #![no_main]
+#![feature(type_alias_impl_trait)]
 
 mod device;
 mod receiver;
 // mod server;
+mod adapter;
+mod tls_task;
 mod transmitter;
 mod tx_frame_buf;
 
@@ -12,13 +15,17 @@ use panic_halt as _;
 
 #[rtic::app(device = stm32f4xx_hal::pac, dispatchers = [ADC])]
 mod app {
+    use crate::adapter::TcpSocketAdapter;
     use crate::device::{ReceiverMutex, SpiDevice};
     use crate::receiver::Receiver;
+    use crate::tls_task;
     use crate::transmitter::Transmitter;
-    use core::fmt::Write;
+    use core::str::FromStr;
     use core::sync::atomic::{AtomicUsize, Ordering};
+    use core::task::{Context, Poll};
     use cortex_m::{interrupt, interrupt::Mutex, singleton};
-    use httparse::Status;
+    use futures::task::noop_waker_ref;
+    use futures::Future;
     use smoltcp::iface::Interface;
     use smoltcp::iface::InterfaceBuilder;
     use smoltcp::iface::NeighborCache;
@@ -30,6 +37,7 @@ mod app {
     use smoltcp::time::Duration;
     use smoltcp::time::Instant;
     use smoltcp::wire::EthernetAddress;
+    use smoltcp::wire::IpAddress;
     use smoltcp::wire::IpCidr;
     use smoltcp::wire::Ipv4Address;
     use smoltcp::wire::Ipv4Cidr;
@@ -97,6 +105,14 @@ mod app {
         let rx_stream = streams_dma1.3;
 
         let rx_bufs = [
+            singleton!(: [u8; crate::receiver::BUFFER_LEN] = [0; crate::receiver::BUFFER_LEN])
+                .unwrap(),
+            singleton!(: [u8; crate::receiver::BUFFER_LEN] = [0; crate::receiver::BUFFER_LEN])
+                .unwrap(),
+            singleton!(: [u8; crate::receiver::BUFFER_LEN] = [0; crate::receiver::BUFFER_LEN])
+                .unwrap(),
+            singleton!(: [u8; crate::receiver::BUFFER_LEN] = [0; crate::receiver::BUFFER_LEN])
+                .unwrap(),
             singleton!(: [u8; crate::receiver::BUFFER_LEN] = [0; crate::receiver::BUFFER_LEN])
                 .unwrap(),
             singleton!(: [u8; crate::receiver::BUFFER_LEN] = [0; crate::receiver::BUFFER_LEN])
@@ -202,15 +218,63 @@ mod app {
         let tcp_socket = TcpSocket::new(tcp_rx_buffer, tcp_tx_buffer);
 
         let tcp_handle = iface.add_socket(tcp_socket);
-        loop {
-            defmt::info!("iteration");
-            let mut request_done = false;
-            let mut buf = [0 as u8; 1600];
-            let mut buf_slice = Some(&mut buf[..]);
-            let mut headers = [httparse::EMPTY_HEADER; 16];
-            let mut req = httparse::Request::new(&mut headers);
 
-            while !request_done {
+        let mut dhcp_ok = false;
+        while !dhcp_ok {
+            let now = Instant::from_millis(monotonics::now().ticks() as i64);
+            match iface.poll(now) {
+                Ok(_) => (),
+                Err(smoltcp::Error::Unrecognized) => (),
+                Err(e) => {
+                    defmt::error!("poll error {}", e);
+                }
+            };
+
+            let event = iface.get_socket::<Dhcpv4Socket>(dhcp_handle).poll();
+            match event {
+                None => {}
+                Some(Dhcpv4Event::Configured(config)) => {
+                    defmt::debug!("DHCP config acquired!");
+
+                    defmt::debug!("IP address:      {}", config.address);
+                    set_ipv4_addr(&mut iface, config.address);
+
+                    if let Some(router) = config.router {
+                        defmt::debug!("Default gateway: {}", router);
+                        iface.routes_mut().add_default_ipv4_route(router).unwrap();
+                    } else {
+                        defmt::debug!("Default gateway: None");
+                        iface.routes_mut().remove_default_ipv4_route();
+                    }
+
+                    for (i, s) in config.dns_servers.iter().enumerate() {
+                        if let Some(s) = s {
+                            defmt::debug!("DNS server {}:    {}", i, s);
+                        }
+                    }
+                    dhcp_ok = true;
+                }
+                Some(Dhcpv4Event::Deconfigured) => {
+                    defmt::debug!("DHCP lost config!");
+                    set_ipv4_addr(&mut iface, Ipv4Cidr::new(Ipv4Address::UNSPECIFIED, 0));
+                    iface.routes_mut().remove_default_ipv4_route();
+                }
+            }
+        }
+        {
+            defmt::info!("Connecting...");
+            {
+                let (socket, socket_cx) = iface.get_socket_and_context::<TcpSocket>(tcp_handle);
+
+                let server_ip = IpAddress::from_str("130.61.96.40").unwrap();
+                let local_port = 50000;
+                socket
+                    .connect(socket_cx, (server_ip, 443), local_port)
+                    .unwrap();
+            }
+
+            let mut connected = false;
+            while !connected {
                 let now = Instant::from_millis(monotonics::now().ticks() as i64);
                 match iface.poll(now) {
                     Ok(_) => (),
@@ -220,100 +284,50 @@ mod app {
                     }
                 };
 
-                let event = iface.get_socket::<Dhcpv4Socket>(dhcp_handle).poll();
-                match event {
-                    None => {}
-                    Some(Dhcpv4Event::Configured(config)) => {
-                        defmt::debug!("DHCP config acquired!");
-
-                        defmt::debug!("IP address:      {}", config.address);
-                        set_ipv4_addr(&mut iface, config.address);
-
-                        if let Some(router) = config.router {
-                            defmt::debug!("Default gateway: {}", router);
-                            iface.routes_mut().add_default_ipv4_route(router).unwrap();
-                        } else {
-                            defmt::debug!("Default gateway: None");
-                            iface.routes_mut().remove_default_ipv4_route();
-                        }
-
-                        for (i, s) in config.dns_servers.iter().enumerate() {
-                            if let Some(s) = s {
-                                defmt::debug!("DNS server {}:    {}", i, s);
-                            }
-                        }
-                    }
-                    Some(Dhcpv4Event::Deconfigured) => {
-                        defmt::debug!("DHCP lost config!");
-                        set_ipv4_addr(&mut iface, Ipv4Cidr::new(Ipv4Address::UNSPECIFIED, 0));
-                        iface.routes_mut().remove_default_ipv4_route();
-                    }
-                }
-
                 let socket = iface.get_socket::<TcpSocket>(tcp_handle);
-                if !socket.is_open() {
-                    socket.listen(80).ok();
-                }
-                if socket.may_recv() {
-                    let r = socket.recv(|buffer| {
-                        if buffer.len() > 0 {
-                            defmt::info!("TCP recv: {}", buffer);
-                        }
-                        let recvd_len = buffer.len();
-                        let slice = buf_slice.take().unwrap();
-                        let r = if recvd_len > slice.len() {
-                            None
-                        } else {
-                            let (dst, rest) = slice.split_at_mut(recvd_len);
-                            dst.copy_from_slice(buffer);
-                            Some((dst, rest))
-                        };
-                        (recvd_len, r)
-                    });
-                    request_done = match r {
-                        Err(e) => {
-                            // 500
-                            defmt::error!("error in socket {}", e);
-                            write!(socket, "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nError in socket").ok();
-                            true
-                        }
-                        Ok(None) => {
-                            // 500
-                            defmt::error!("buffer overrun");
-                            write!(socket, "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nBuffer overrun").ok();
-                            true
-                        }
-                        Ok(Some((dst, rest))) => {
-                            buf_slice.replace(rest);
-                            let r = req.parse(dst);
-                            match r {
-                                Err(_) => {
-                                    defmt::error!("error in request");
-                                    write!(socket, "HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nBad Request").ok();
-                                    true
-                                }
-                                Ok(Status::Partial) => false,
-                                Ok(Status::Complete(_)) => {
-                                    // ok
-                                    defmt::info!("requested method: {}", req.method);
-                                    defmt::info!("requested path: {}", req.path);
-                                    if req.method == Some("GET") && req.path.is_some() {
-                                        write_response(socket, req.path.unwrap()).ok();
-                                        true
-                                    } else {
-                                        // 405
-                                        write!(socket, "HTTP/1.1 405 Method Not Allowed\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nMethod Not Allowed").ok();
-                                        true
-                                    }
-                                }
-                            }
-                        }
-                    };
-                    if request_done {
-                        socket.close();
+                connected = socket.may_send();
+            }
+
+            defmt::info!("Connected to imihajlov.tk!");
+        }
+        let mut iface = {
+            let mut adapter =
+                TcpSocketAdapter::new(iface, tcp_handle, || monotonics::now().ticks() as i64);
+            let success = {
+                let mut task = tls_task::test_tls(&mut adapter);
+                let mut task_pin = unsafe { core::pin::Pin::new_unchecked(&mut task) };
+                let mut ctx = Context::from_waker(noop_waker_ref());
+                let r = {
+                    let mut result = Poll::Pending;
+                    while result.is_pending() {
+                        result = task_pin.as_mut().poll(&mut ctx);
+                    }
+                    if let Poll::Ready(r) = result {
+                        r
+                    } else {
+                        unreachable!()
+                    }
+                };
+                match r {
+                    Ok(_) => {
+                        defmt::info!("OK!");
+                    }
+                    Err(e) => {
+                        defmt::error!("Error after all this shit: {}", e);
                     }
                 }
-            }
+            };
+            adapter.release()
+        };
+        loop {
+            let now = Instant::from_millis(monotonics::now().ticks() as i64);
+            match iface.poll(now) {
+                Ok(_) => (),
+                Err(smoltcp::Error::Unrecognized) => (),
+                Err(e) => {
+                    defmt::error!("poll error {}", e);
+                }
+            };
         }
     }
 

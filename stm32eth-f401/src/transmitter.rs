@@ -20,13 +20,6 @@ type PinSck = PC10<Output>;
 type PinMosi = PC12<Output>;
 type DmaStream = Stream7<DMA1>;
 
-pub struct SpiTxPeriph {
-    spi: SPI3,
-    sck: PinSck,
-    mosi: PinMosi,
-    clocks: Clocks,
-}
-
 pub struct Transmitter {
     spi: Spi<SPI3, (PinSck, NoMiso, PinMosi), false>,
     dma_stream: DmaStream,

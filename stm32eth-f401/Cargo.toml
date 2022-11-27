@@ -41,3 +41,26 @@ default-features = false
 
 [dependencies.heapless]
 version = "0.7"
+
+[dependencies.embedded-tls]
+version = "0.9"
+default-features = false
+features = ["async", "defmt"]
+
+[dependencies.rand]
+version = "0.8"
+default-features = false
+features = ["std_rng"]
+
+[dependencies.embedded-io]
+version = "0.3"
+default-features = false
+features = ["defmt", "async"]
+
+[dependencies.futures]
+version = "0.3"
+default-features = false
+
+[dependencies.futures-executor]
+version = "0.3"
+default-features = false

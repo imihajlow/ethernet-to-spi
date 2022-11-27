@@ -14,7 +14,7 @@ use stm32f4xx_hal::{
 use replace_with::{replace_with, replace_with_and_return};
 
 pub const BUFFER_LEN: usize = 1600;
-pub const MAX_BUFFERS: usize = 4;
+pub const MAX_BUFFERS: usize = 8;
 const MIN_FRAME_LEN: usize = 2 * 6 + 2 + 4;
 const CRC: Crc<u32> = Crc::<u32>::new(&CRC_32_ISO_HDLC);
 
@@ -53,7 +53,7 @@ enum ReceiverState {
 }
 
 #[derive(Default)]
-struct Stats {
+pub struct Stats {
     flipped: usize,
     missed: usize,
     received: usize,
@@ -192,7 +192,9 @@ impl Receiver {
                         self.stats.count_good();
                         self.received_frames.enqueue((ret_buf, len)).ok();
                     } else {
-                        self.stats.count_bad_fcs();
+                        if let Err(FrameError::InvalidFcs) = result {
+                            self.stats.count_bad_fcs();
+                        }
                         self.vacant_buffers.enqueue(ret_buf).ok();
                     }
                     (Some(result), ReceiverState::Idle(periph))
@@ -208,6 +210,10 @@ impl Receiver {
         }
         self.stats.dump();
         result
+    }
+
+    pub fn get_stats(&self) -> &Stats {
+        &self.stats
     }
 
     fn clear_cs_interrupt_and_return_true_if_still_low(&mut self) -> bool {
@@ -254,6 +260,12 @@ impl Stats {
             );
             self.iteration = 0;
         }
+    }
+}
+
+impl core::fmt::Display for Stats {
+    fn fmt(&self, fmt: &mut core::fmt::Formatter<'_>) -> Result<(), core::fmt::Error> {
+        write!(fmt, "Good: {}, bad FCS: {}, missed: {}, flipped: {}", self.received, self.bad_fcs, self.missed, self.flipped)
     }
 }
 
