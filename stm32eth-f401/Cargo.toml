@@ -41,9 +41,11 @@ default-features = false
 
 [dependencies.heapless]
 version = "0.7"
+features = ["serde"]
 
 [dependencies.embedded-tls]
-version = "0.9"
+git = "https://github.com/drogue-iot/embedded-tls.git"
+rev = "5180c1ea"
 default-features = false
 features = ["async", "defmt"]
 
@@ -64,3 +66,17 @@ default-features = false
 [dependencies.futures-executor]
 version = "0.3"
 default-features = false
+
+[dependencies.serde]
+version = "1.0"
+default-features = false
+features = ["derive"]
+
+[dependencies.serde_derive]
+version = "1.0.147"
+default-features = false
+
+[dependencies.serde-json-core]
+version = "0.5"
+default-features = false
+features = ["heapless"]

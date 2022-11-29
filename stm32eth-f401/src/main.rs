@@ -9,6 +9,8 @@ mod adapter;
 mod tls_task;
 mod transmitter;
 mod tx_frame_buf;
+mod bot_token;
+mod tg;
 
 use defmt_rtt as _;
 use panic_halt as _;
@@ -26,6 +28,8 @@ mod app {
     use cortex_m::{interrupt, interrupt::Mutex, singleton};
     use futures::task::noop_waker_ref;
     use futures::Future;
+    use rand::rngs::StdRng;
+    use rand::SeedableRng;
     use smoltcp::iface::Interface;
     use smoltcp::iface::InterfaceBuilder;
     use smoltcp::iface::NeighborCache;
@@ -261,60 +265,19 @@ mod app {
                 }
             }
         }
-        {
-            defmt::info!("Connecting...");
-            {
-                let (socket, socket_cx) = iface.get_socket_and_context::<TcpSocket>(tcp_handle);
 
-                let server_ip = IpAddress::from_str("130.61.96.40").unwrap();
-                let local_port = 50000;
-                socket
-                    .connect(socket_cx, (server_ip, 443), local_port)
-                    .unwrap();
-            }
+        let mut rng = StdRng::seed_from_u64(monotonics::now().ticks() as u64);
 
-            let mut connected = false;
-            while !connected {
-                let now = Instant::from_millis(monotonics::now().ticks() as i64);
-                match iface.poll(now) {
-                    Ok(_) => (),
-                    Err(smoltcp::Error::Unrecognized) => (),
-                    Err(e) => {
-                        defmt::error!("poll error {}", e);
-                    }
-                };
-
-                let socket = iface.get_socket::<TcpSocket>(tcp_handle);
-                connected = socket.may_send();
-            }
-
-            defmt::info!("Connected to imihajlov.tk!");
-        }
         let mut iface = {
             let mut adapter =
                 TcpSocketAdapter::new(iface, tcp_handle, || monotonics::now().ticks() as i64);
             let success = {
-                let mut task = tls_task::test_tls(&mut adapter);
+                let mut task = tls_task::bot_task(&mut adapter, &mut rng);
                 let mut task_pin = unsafe { core::pin::Pin::new_unchecked(&mut task) };
                 let mut ctx = Context::from_waker(noop_waker_ref());
-                let r = {
-                    let mut result = Poll::Pending;
-                    while result.is_pending() {
-                        result = task_pin.as_mut().poll(&mut ctx);
-                    }
-                    if let Poll::Ready(r) = result {
-                        r
-                    } else {
-                        unreachable!()
-                    }
-                };
-                match r {
-                    Ok(_) => {
-                        defmt::info!("OK!");
-                    }
-                    Err(e) => {
-                        defmt::error!("Error after all this shit: {}", e);
-                    }
+                let mut result = Poll::Pending;
+                while result.is_pending() {
+                    result = task_pin.as_mut().poll(&mut ctx);
                 }
             };
             adapter.release()

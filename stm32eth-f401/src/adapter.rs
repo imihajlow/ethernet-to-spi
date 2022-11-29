@@ -6,6 +6,7 @@ use embedded_io::asynch::{Read, Write};
 use embedded_io::Io;
 use smoltcp::iface::{Interface, SocketHandle};
 use smoltcp::socket::TcpSocket;
+use smoltcp::wire::IpEndpoint;
 
 use crate::device::SpiDevice;
 
@@ -18,7 +19,7 @@ pub struct TcpSocketAdapter<'a> {
 }
 
 #[derive(Debug)]
-pub struct TcpSocketAdapterError(smoltcp::Error);
+pub struct TcpSocketAdapterError(pub smoltcp::Error);
 
 pub struct ReadFuture<'a, 'b>
 where
@@ -36,14 +37,27 @@ where
     buf: &'b [u8],
 }
 
+pub struct ConnectFuture<'a, 'b>
+where
+    'a: 'b,
+{
+    adapter: &'b mut TcpSocketAdapter<'a>,
+    remote_endpoint: IpEndpoint,
+    local_endpoint: IpEndpoint,
+    connecting: bool,
+}
+
+pub struct CloseFuture<'a, 'b>
+where
+    'a: 'b,
+{
+    adapter: &'b mut TcpSocketAdapter<'a>,
+}
+
 pub struct FlushFuture();
 
 impl<'a> TcpSocketAdapter<'a> {
-    pub fn new(
-        iface: Interface<'a, SpiDevice>,
-        handle: SocketHandle,
-        get_ticks: GetTicks,
-    ) -> Self {
+    pub fn new(iface: Interface<'a, SpiDevice>, handle: SocketHandle, get_ticks: GetTicks) -> Self {
         Self {
             iface,
             handle,
@@ -53,6 +67,48 @@ impl<'a> TcpSocketAdapter<'a> {
 
     pub fn release(self) -> Interface<'a, SpiDevice> {
         self.iface
+    }
+
+    pub fn connect<'b, T: Into<IpEndpoint>, U: Into<IpEndpoint>>(
+        &'b mut self,
+        remote_endpoint: T,
+        local_endpoint: U,
+    ) -> ConnectFuture<'a, 'b> {
+        ConnectFuture {
+            adapter: self,
+            remote_endpoint: remote_endpoint.into(),
+            local_endpoint: local_endpoint.into(),
+            connecting: false,
+        }
+    }
+
+    pub fn close<'b>(&'b mut self) -> CloseFuture<'a, 'b> {
+        {
+            let sock = self.iface.get_socket::<TcpSocket>(self.handle);
+            sock.close();
+        }
+        CloseFuture { adapter: self }
+    }
+
+    fn poll(&mut self) -> Result<(), TcpSocketAdapterError> {
+        let now = Instant::from_millis((self.get_ticks)());
+        self.iface.poll(now)?;
+        Ok(())
+    }
+
+    fn is_active(&mut self) -> bool {
+        let sock = self.iface.get_socket::<TcpSocket>(self.handle);
+        sock.is_active()
+    }
+
+    fn can_send(&mut self) -> bool {
+        let sock = self.iface.get_socket::<TcpSocket>(self.handle);
+        sock.can_send()
+    }
+
+    fn can_recv(&mut self) -> bool {
+        let sock = self.iface.get_socket::<TcpSocket>(self.handle);
+        sock.can_recv()
     }
 }
 
@@ -101,16 +157,6 @@ impl<'a, 'b> ReadFuture<'a, 'b> {
             .get_socket::<TcpSocket>(self.adapter.handle);
         sock.recv_slice(self.buf).map_err(Into::into)
     }
-
-    fn can_recv(&mut self) -> Result<bool, TcpSocketAdapterError> {
-        let now = Instant::from_millis((self.adapter.get_ticks)());
-        self.adapter.iface.poll(now)?;
-        let sock = self
-            .adapter
-            .iface
-            .get_socket::<TcpSocket>(self.adapter.handle);
-        Ok(sock.can_recv())
-    }
 }
 
 impl<'a, 'b> Future for ReadFuture<'a, 'b> {
@@ -119,13 +165,17 @@ impl<'a, 'b> Future for ReadFuture<'a, 'b> {
         mut self: core::pin::Pin<&mut Self>,
         ctx: &mut core::task::Context<'_>,
     ) -> Poll<<Self as Future>::Output> {
-        match (*self).can_recv() {
-            Ok(true) => Poll::Ready((*self).recv()),
-            Ok(false) => {
-                ctx.waker().wake_by_ref();
-                Poll::Pending
-            }
-            Err(e) => Poll::Ready(Err(e)),
+        if let Err(e) = self.adapter.poll() {
+            return Poll::Ready(Err(e));
+        }
+        if !self.adapter.is_active() {
+            return Poll::Ready(Err(TcpSocketAdapterError(smoltcp::Error::Dropped)));
+        }
+        if self.adapter.can_recv() {
+            Poll::Ready((*self).recv())
+        } else {
+            ctx.waker().wake_by_ref();
+            Poll::Pending
         }
     }
 }
@@ -138,16 +188,6 @@ impl<'a, 'b> WriteFuture<'a, 'b> {
             .get_socket::<TcpSocket>(self.adapter.handle);
         sock.send_slice(self.buf).map_err(Into::into)
     }
-
-    fn can_send(&mut self) -> Result<bool, TcpSocketAdapterError> {
-        let now = Instant::from_millis((self.adapter.get_ticks)());
-        self.adapter.iface.poll(now)?;
-        let sock = self
-            .adapter
-            .iface
-            .get_socket::<TcpSocket>(self.adapter.handle);
-        Ok(sock.can_send())
-    }
 }
 
 impl<'a, 'b> Future for WriteFuture<'a, 'b> {
@@ -156,13 +196,17 @@ impl<'a, 'b> Future for WriteFuture<'a, 'b> {
         mut self: core::pin::Pin<&mut Self>,
         ctx: &mut core::task::Context<'_>,
     ) -> Poll<<Self as Future>::Output> {
-        match (*self).can_send() {
-            Ok(true) => Poll::Ready((*self).send()),
-            Ok(false) => {
-                ctx.waker().wake_by_ref();
-                Poll::Pending
-            }
-            Err(e) => Poll::Ready(Err(e)),
+        if let Err(e) = self.adapter.poll() {
+            return Poll::Ready(Err(e));
+        }
+        if !self.adapter.is_active() {
+            return Poll::Ready(Err(TcpSocketAdapterError(smoltcp::Error::Dropped)));
+        }
+        if self.adapter.can_send() {
+            Poll::Ready((*self).send())
+        } else {
+            ctx.waker().wake_by_ref();
+            Poll::Pending
         }
     }
 }
@@ -174,5 +218,63 @@ impl Future for FlushFuture {
         _: &mut core::task::Context<'_>,
     ) -> Poll<<Self as Future>::Output> {
         Poll::Ready(Ok(()))
+    }
+}
+
+impl<'a, 'b> ConnectFuture<'a, 'b> {
+    fn connect(&mut self) -> Result<(), TcpSocketAdapterError> {
+        let (sock, cx) = self
+            .adapter
+            .iface
+            .get_socket_and_context::<TcpSocket>(self.adapter.handle);
+        sock.connect(cx, self.remote_endpoint, self.local_endpoint)
+            .map_err(Into::into)
+    }
+}
+
+impl<'a, 'b> Future for ConnectFuture<'a, 'b> {
+    type Output = Result<(), TcpSocketAdapterError>;
+    fn poll(
+        mut self: core::pin::Pin<&mut Self>,
+        ctx: &mut core::task::Context<'_>,
+    ) -> Poll<<Self as Future>::Output> {
+        if !self.connecting {
+            self.connecting = true;
+            match self.connect() {
+                Ok(()) => {
+                    ctx.waker().wake_by_ref();
+                    Poll::Pending
+                }
+                Err(e) => Poll::Ready(Err(e)),
+            }
+        } else {
+            if let Err(e) = self.adapter.poll() {
+                return Poll::Ready(Err(e));
+            }
+            if self.adapter.is_active() {
+                Poll::Ready(Ok(()))
+            } else {
+                ctx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        }
+    }
+}
+
+impl<'a, 'b> Future for CloseFuture<'a, 'b> {
+    type Output = Result<(), TcpSocketAdapterError>;
+    fn poll(
+        mut self: core::pin::Pin<&mut Self>,
+        ctx: &mut core::task::Context<'_>,
+    ) -> Poll<<Self as Future>::Output> {
+        if !self.adapter.is_active() {
+            Poll::Ready(Ok(()))
+        } else {
+            if let Err(e) = self.adapter.poll() {
+                return Poll::Ready(Err(e));
+            }
+            ctx.waker().wake_by_ref();
+            Poll::Pending
+        }
     }
 }
