@@ -11,6 +11,7 @@ mod transmitter;
 mod tx_frame_buf;
 mod bot_token;
 mod tg;
+mod tg_bot;
 
 use defmt_rtt as _;
 use panic_halt as _;
@@ -41,7 +42,6 @@ mod app {
     use smoltcp::time::Duration;
     use smoltcp::time::Instant;
     use smoltcp::wire::EthernetAddress;
-    use smoltcp::wire::IpAddress;
     use smoltcp::wire::IpCidr;
     use smoltcp::wire::Ipv4Address;
     use smoltcp::wire::Ipv4Cidr;
@@ -109,14 +109,6 @@ mod app {
         let rx_stream = streams_dma1.3;
 
         let rx_bufs = [
-            singleton!(: [u8; crate::receiver::BUFFER_LEN] = [0; crate::receiver::BUFFER_LEN])
-                .unwrap(),
-            singleton!(: [u8; crate::receiver::BUFFER_LEN] = [0; crate::receiver::BUFFER_LEN])
-                .unwrap(),
-            singleton!(: [u8; crate::receiver::BUFFER_LEN] = [0; crate::receiver::BUFFER_LEN])
-                .unwrap(),
-            singleton!(: [u8; crate::receiver::BUFFER_LEN] = [0; crate::receiver::BUFFER_LEN])
-                .unwrap(),
             singleton!(: [u8; crate::receiver::BUFFER_LEN] = [0; crate::receiver::BUFFER_LEN])
                 .unwrap(),
             singleton!(: [u8; crate::receiver::BUFFER_LEN] = [0; crate::receiver::BUFFER_LEN])
@@ -266,12 +258,13 @@ mod app {
             }
         }
 
+        defmt::info!("now = {}", monotonics::now().ticks());
         let mut rng = StdRng::seed_from_u64(monotonics::now().ticks() as u64);
 
         let mut iface = {
             let mut adapter =
                 TcpSocketAdapter::new(iface, tcp_handle, || monotonics::now().ticks() as i64);
-            let success = {
+            {
                 let mut task = tls_task::bot_task(&mut adapter, &mut rng);
                 let mut task_pin = unsafe { core::pin::Pin::new_unchecked(&mut task) };
                 let mut ctx = Context::from_waker(noop_waker_ref());

@@ -3,8 +3,6 @@ name = "stm32eth-f401"
 version = "0.1.0"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
 embedded-hal = "0.2"
 nb = "1"
@@ -44,8 +42,7 @@ version = "0.7"
 features = ["serde"]
 
 [dependencies.embedded-tls]
-git = "https://github.com/drogue-iot/embedded-tls.git"
-rev = "5180c1ea"
+version = "0.10"
 default-features = false
 features = ["async", "defmt"]
 
@@ -55,7 +52,7 @@ default-features = false
 features = ["std_rng"]
 
 [dependencies.embedded-io]
-version = "0.3"
+version = "0.4"
 default-features = false
 features = ["defmt", "async"]
 

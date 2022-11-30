@@ -14,7 +14,7 @@ use stm32f4xx_hal::{
 use replace_with::{replace_with, replace_with_and_return};
 
 pub const BUFFER_LEN: usize = 1600;
-pub const MAX_BUFFERS: usize = 8;
+pub const MAX_BUFFERS: usize = 4;
 const MIN_FRAME_LEN: usize = 2 * 6 + 2 + 4;
 const CRC: Crc<u32> = Crc::<u32>::new(&CRC_32_ISO_HDLC);
 
@@ -150,7 +150,7 @@ impl Receiver {
             || panic!(),
             |state| match state {
                 ReceiverState::Listen(transfer, pin_cs) => {
-                    let (stream, ret_rx, mut ret_buf, _) = transfer.release();
+                    let (stream, ret_rx, ret_buf, _) = transfer.release();
                     let mut spi = ret_rx.release();
                     spi.set_internal_nss(true);
                     let stream: DmaStream = stream; // ensure type

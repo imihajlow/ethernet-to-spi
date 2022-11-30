@@ -40,10 +40,17 @@ pub struct Update<'a> {
 }
 
 #[derive(Deserialize)]
-pub struct Response<'a, const N: usize> {
+pub struct GetUpdatesResponse<'a, const N: usize> {
     pub ok: bool,
     #[serde(borrow)]
     pub result: Vec<Update<'a>, N>,
+}
+
+#[derive(Deserialize)]
+pub struct SendMessageResponse<'a> {
+    pub ok: bool,
+    #[serde(borrow)]
+    pub result: Message<'a>,
 }
 
 
@@ -57,4 +64,11 @@ pub struct GetUpdatesParams<'a> {
     pub timeout: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub allowed_updates: Option<&'a [&'a str]>,
+}
+
+
+#[derive(Serialize)]
+pub struct SendMessageParams<'a> {
+    pub chat_id: u64,
+    pub text: &'a str,
 }
