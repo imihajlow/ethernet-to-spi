@@ -1,6 +1,7 @@
+use core::cell::RefCell;
 use core::future::Future;
 use core::task::Poll;
-use smoltcp::time::{Instant, Duration};
+use smoltcp::time::{Duration, Instant};
 
 use embedded_io::asynch::{Read, Write};
 use embedded_io::Io;
@@ -13,7 +14,7 @@ use crate::device::SpiDevice;
 type GetTicks = fn() -> i64;
 
 pub struct TcpSocketAdapter<'a> {
-    iface: Interface<'a, SpiDevice>,
+    iface: &'a RefCell<Interface<'a, SpiDevice>>,
     handle: SocketHandle,
     pub get_ticks: GetTicks,
 }
@@ -21,13 +22,13 @@ pub struct TcpSocketAdapter<'a> {
 #[derive(Debug, defmt::Format)]
 pub enum TcpSocketAdapterError {
     Smoltcp(smoltcp::Error),
-    Timeout
+    Timeout,
 }
 
 pub struct ReadFuture<'socket, 'adapter, 'buf>
 where
     'socket: 'adapter,
-    'socket: 'buf
+    'socket: 'buf,
 {
     adapter: &'adapter mut TcpSocketAdapter<'socket>,
     buf: &'buf mut [u8],
@@ -36,7 +37,7 @@ where
 pub struct WriteFuture<'socket, 'adapter, 'buf>
 where
     'socket: 'adapter,
-    'socket: 'buf
+    'socket: 'buf,
 {
     adapter: &'adapter mut TcpSocketAdapter<'socket>,
     buf: &'buf [u8],
@@ -62,7 +63,11 @@ where
 pub struct FlushFuture();
 
 impl<'a> TcpSocketAdapter<'a> {
-    pub fn new(iface: Interface<'a, SpiDevice>, handle: SocketHandle, get_ticks: GetTicks) -> Self {
+    pub fn new(
+        iface: &'a RefCell<Interface<'a, SpiDevice>>,
+        handle: SocketHandle,
+        get_ticks: GetTicks,
+    ) -> Self {
         Self {
             iface,
             handle,
@@ -70,16 +75,11 @@ impl<'a> TcpSocketAdapter<'a> {
         }
     }
 
-    pub fn release(self) -> Interface<'a, SpiDevice> {
-        self.iface
-    }
-
     pub fn connect<'b, T: Into<IpEndpoint>, U: Into<IpEndpoint>>(
         &'b mut self,
         remote_endpoint: T,
         local_endpoint: U,
     ) -> ConnectFuture<'a, 'b> {
-        let time_start = (self.get_ticks)();
         ConnectFuture {
             adapter: self,
             remote_endpoint: remote_endpoint.into(),
@@ -90,7 +90,8 @@ impl<'a> TcpSocketAdapter<'a> {
 
     pub fn close<'b>(&'b mut self) -> CloseFuture<'a, 'b> {
         {
-            let sock = self.iface.get_socket::<TcpSocket>(self.handle);
+            let mut iface = self.iface.borrow_mut();
+            let sock = iface.get_socket::<TcpSocket>(self.handle);
             sock.close();
         }
         CloseFuture { adapter: self }
@@ -98,22 +99,25 @@ impl<'a> TcpSocketAdapter<'a> {
 
     fn poll(&mut self) -> Result<(), TcpSocketAdapterError> {
         let now = Instant::from_millis((self.get_ticks)());
-        self.iface.poll(now)?;
+        self.iface.borrow_mut().poll(now)?;
         Ok(())
     }
 
     fn is_active(&mut self) -> bool {
-        let sock = self.iface.get_socket::<TcpSocket>(self.handle);
+        let mut iface = self.iface.borrow_mut();
+        let sock = iface.get_socket::<TcpSocket>(self.handle);
         sock.is_active()
     }
 
     fn can_send(&mut self) -> bool {
-        let sock = self.iface.get_socket::<TcpSocket>(self.handle);
+        let mut iface = self.iface.borrow_mut();
+        let sock = iface.get_socket::<TcpSocket>(self.handle);
         sock.can_send()
     }
 
     fn can_recv(&mut self) -> bool {
-        let sock = self.iface.get_socket::<TcpSocket>(self.handle);
+        let mut iface = self.iface.borrow_mut();
+        let sock = iface.get_socket::<TcpSocket>(self.handle);
         sock.can_recv()
     }
 }
@@ -135,24 +139,20 @@ impl<'a> Io for TcpSocketAdapter<'a> {
 }
 
 impl<'socket> Read for TcpSocketAdapter<'socket> {
-    // type ReadFuture<'c> = ReadFuture<'a, 'c> where Self: 'c;
-
-    fn read<'adapter, 'buf>(&'adapter mut self, buf: &'buf mut [u8]) -> ReadFuture<'socket, 'adapter, 'buf> {
-        let time_start = (self.get_ticks)();
-        ReadFuture {
-            adapter: self,
-            buf,
-        }
+    fn read<'adapter, 'buf>(
+        &'adapter mut self,
+        buf: &'buf mut [u8],
+    ) -> ReadFuture<'socket, 'adapter, 'buf> {
+        ReadFuture { adapter: self, buf }
     }
 }
 
 impl<'socket> Write for TcpSocketAdapter<'socket> {
-    fn write<'adapter, 'buf>(&'adapter mut self, buf: &'buf [u8]) -> WriteFuture<'socket, 'adapter, 'buf> {
-        let time_start = (self.get_ticks)();
-        WriteFuture {
-            adapter: self,
-            buf,
-        }
+    fn write<'adapter, 'buf>(
+        &'adapter mut self,
+        buf: &'buf [u8],
+    ) -> WriteFuture<'socket, 'adapter, 'buf> {
+        WriteFuture { adapter: self, buf }
     }
 
     fn flush<'adapter>(&'adapter mut self) -> FlushFuture {
@@ -162,10 +162,8 @@ impl<'socket> Write for TcpSocketAdapter<'socket> {
 
 impl<'socket, 'adapter, 'buf> ReadFuture<'socket, 'adapter, 'buf> {
     fn recv(&mut self) -> Result<usize, TcpSocketAdapterError> {
-        let sock = self
-            .adapter
-            .iface
-            .get_socket::<TcpSocket>(self.adapter.handle);
+        let mut iface = self.adapter.iface.borrow_mut();
+        let sock = iface.get_socket::<TcpSocket>(self.adapter.handle);
         sock.recv_slice(self.buf).map_err(Into::into)
     }
 }
@@ -193,9 +191,8 @@ impl<'socket, 'adapter, 'buf> Future for ReadFuture<'socket, 'adapter, 'buf> {
 
 impl<'socket, 'adapter, 'buf> WriteFuture<'socket, 'adapter, 'buf> {
     fn send(&mut self) -> Result<usize, TcpSocketAdapterError> {
-        let sock = self
-            .adapter
-            .iface
+        let mut iface = self.adapter.iface.borrow_mut();
+        let sock = iface
             .get_socket::<TcpSocket>(self.adapter.handle);
         sock.send_slice(self.buf).map_err(Into::into)
     }
@@ -234,9 +231,8 @@ impl Future for FlushFuture {
 
 impl<'a, 'b> ConnectFuture<'a, 'b> {
     fn connect(&mut self) -> Result<(), TcpSocketAdapterError> {
-        let (sock, cx) = self
-            .adapter
-            .iface
+        let mut iface = self.adapter.iface.borrow_mut();
+        let (sock, cx) = iface
             .get_socket_and_context::<TcpSocket>(self.adapter.handle);
         sock.set_timeout(Some(Duration::from_secs(20)));
         sock.set_keep_alive(Some(Duration::from_secs(5)));

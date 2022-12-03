@@ -9,12 +9,16 @@ nb = "1"
 cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
 cortex-m-rt = "0.7"
 # Panic behaviour, see https://crates.io/keywords/panic-impl for alternatives
-panic-halt = "0.2"
+# panic-halt = "0.2"
 defmt-rtt = "0.4"
 systick-monotonic = "1"
 cortex-m-rtic = ">=1.1"
 crc = "2"
 embedded-dma = ">=0.2"
+
+[dependencies.panic-probe]
+version = "0.3"
+features = ["print-defmt"]
 
 [dependencies.defmt]
 version = "0.3"

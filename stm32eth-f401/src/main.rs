@@ -12,9 +12,10 @@ mod tx_frame_buf;
 mod bot_token;
 mod tg;
 mod tg_bot;
+mod event;
 
 use defmt_rtt as _;
-use panic_halt as _;
+use panic_probe as _;
 
 #[rtic::app(device = stm32f4xx_hal::pac, dispatchers = [ADC])]
 mod app {
@@ -23,7 +24,6 @@ mod app {
     use crate::receiver::Receiver;
     use crate::tls_task;
     use crate::transmitter::Transmitter;
-    use core::str::FromStr;
     use core::sync::atomic::{AtomicUsize, Ordering};
     use core::task::{Context, Poll};
     use cortex_m::{interrupt, interrupt::Mutex, singleton};
@@ -73,11 +73,15 @@ mod app {
         transmitter: Option<Transmitter>,
         receiver_idle: ReceiverMutex,
         receiver_cs_up: ReceiverMutex,
+        bt_press_producer: heapless::spsc::Producer<'static, (), 4>,
+        bt_press_consumer: heapless::spsc::Consumer<'static, (), 4>,
     }
 
     static BUTTON_PRESS_COUNT: AtomicUsize = AtomicUsize::new(0);
 
-    #[init(local = [receiver: Mutex<RefCell<Option<Receiver>>> = Mutex::new(RefCell::new(None))])]
+    #[init(local = [
+        receiver: Mutex<RefCell<Option<Receiver>>> = Mutex::new(RefCell::new(None)),
+        bt_press_queue: heapless::spsc::Queue<(), 4> = heapless::spsc::Queue::new()])]
     fn init(cx: init::Context) -> (Shared, Local, init::Monotonics) {
         let mut dp = cx.device;
 
@@ -140,6 +144,7 @@ mod app {
             &clocks,
             tx_buf,
         );
+        let (producer, consumer) = cx.local.bt_press_queue.split();
         (
             Shared {},
             Local {
@@ -149,22 +154,26 @@ mod app {
                 receiver_idle: cx.local.receiver,
                 receiver_cs_up: cx.local.receiver,
                 transmitter: Some(transmitter),
+                bt_press_producer: producer,
+                bt_press_consumer: consumer,
             },
             init::Monotonics(mono),
         )
     }
 
-    #[task(binds = EXTI15_10, priority = 5, local = [button_pin, out_pin, led_pin])]
+    #[task(binds = EXTI15_10, priority = 5, local = [button_pin, out_pin, led_pin, bt_press_producer])]
     fn task_exti15_10(ctx: task_exti15_10::Context) {
         let button_pin = ctx.local.button_pin;
         let out_pin = ctx.local.out_pin;
         let led_pin = ctx.local.led_pin;
+        let producer = ctx.local.bt_press_producer;
         if button_pin.check_interrupt() {
             if button_pin.is_high() {
                 out_pin.set_high();
                 led_pin.set_high();
             } else {
                 BUTTON_PRESS_COUNT.fetch_add(1, Ordering::SeqCst);
+                producer.enqueue(()).ok();
                 out_pin.set_low();
                 led_pin.set_low();
             }
@@ -172,7 +181,7 @@ mod app {
         }
     }
 
-    #[idle(local = [receiver_idle, transmitter])]
+    #[idle(local = [receiver_idle, transmitter, bt_press_consumer])]
     fn idle(ctx: idle::Context) -> ! {
         defmt::trace!("idle task started");
         let receiver = ctx.local.receiver_idle;
@@ -186,7 +195,7 @@ mod app {
         });
 
         let device = SpiDevice::new(receiver, ctx.local.transmitter.take().unwrap());
-        let mut sockets = [SocketStorage::EMPTY; 2];
+        let mut sockets = [SocketStorage::EMPTY; 3];
         let mut neighbor_cache_storage = [None; 8];
         let hwaddr = EthernetAddress([0x06, 0x22, 0x33, 0x44, 0x55, 0x66]);
         let neighbor_cache = NeighborCache::new(&mut neighbor_cache_storage[..]);
@@ -207,14 +216,22 @@ mod app {
 
         let dhcp_handle = iface.add_socket(dhcp_socket);
 
-        let mut tcp_rx_buffer_storage = [0 as u8; 4096];
-        let mut tcp_tx_buffer_storage = [0 as u8; 4096];
-        let tcp_rx_buffer = TcpSocketBuffer::new(&mut tcp_rx_buffer_storage[..]);
-        let tcp_tx_buffer = TcpSocketBuffer::new(&mut tcp_tx_buffer_storage[..]);
-        let tcp_socket = TcpSocket::new(tcp_rx_buffer, tcp_tx_buffer);
+        let tcp_rx_buffer_storage_1 = singleton!(: [u8; 4096] = [0; 4096]).unwrap();
+        let tcp_tx_buffer_storage_1 = singleton!(: [u8; 4096] = [0; 4096]).unwrap();
+        let tcp_rx_buffer_1 = TcpSocketBuffer::new(&mut tcp_rx_buffer_storage_1[..]);
+        let tcp_tx_buffer_1 = TcpSocketBuffer::new(&mut tcp_tx_buffer_storage_1[..]);
+        let tcp_socket_1 = TcpSocket::new(tcp_rx_buffer_1, tcp_tx_buffer_1);
 
-        let tcp_handle = iface.add_socket(tcp_socket);
+        let tcp_rx_buffer_storage_2 = singleton!(: [u8; 4096] = [0; 4096]).unwrap();
+        let tcp_tx_buffer_storage_2 = singleton!(: [u8; 4096] = [0; 4096]).unwrap();
+        let tcp_rx_buffer_2 = TcpSocketBuffer::new(&mut tcp_rx_buffer_storage_2[..]);
+        let tcp_tx_buffer_2 = TcpSocketBuffer::new(&mut tcp_tx_buffer_storage_2[..]);
+        let tcp_socket_2 = TcpSocket::new(tcp_rx_buffer_2, tcp_tx_buffer_2);
 
+        let tcp_handle_1 = iface.add_socket(tcp_socket_1);
+        let tcp_handle_2 = iface.add_socket(tcp_socket_2);
+
+        defmt::trace!("fuck");
         let mut dhcp_ok = false;
         while !dhcp_ok {
             let now = Instant::from_millis(monotonics::now().ticks() as i64);
@@ -261,30 +278,21 @@ mod app {
         defmt::info!("now = {}", monotonics::now().ticks());
         let mut rng = StdRng::seed_from_u64(monotonics::now().ticks() as u64);
 
-        let mut iface = {
-            let mut adapter =
-                TcpSocketAdapter::new(iface, tcp_handle, || monotonics::now().ticks() as i64);
-            {
-                let mut task = tls_task::bot_task(&mut adapter, &mut rng);
-                let mut task_pin = unsafe { core::pin::Pin::new_unchecked(&mut task) };
-                let mut ctx = Context::from_waker(noop_waker_ref());
-                let mut result = Poll::Pending;
-                while result.is_pending() {
-                    result = task_pin.as_mut().poll(&mut ctx);
-                }
-            };
-            adapter.release()
+        let iface_cell = RefCell::new(iface);
+        let adapter1 =
+            TcpSocketAdapter::new(&iface_cell, tcp_handle_1, || monotonics::now().ticks() as i64);
+        let adapter2 =
+            TcpSocketAdapter::new(&iface_cell, tcp_handle_2, || monotonics::now().ticks() as i64);
+        {
+            let mut task = tls_task::bot_task(adapter1, adapter2, &mut rng, ctx.local.bt_press_consumer);
+            let mut task_pin = unsafe { core::pin::Pin::new_unchecked(&mut task) };
+            let mut ctx = Context::from_waker(noop_waker_ref());
+            let mut result = Poll::Pending;
+            while result.is_pending() {
+                result = task_pin.as_mut().poll(&mut ctx);
+            }
         };
-        loop {
-            let now = Instant::from_millis(monotonics::now().ticks() as i64);
-            match iface.poll(now) {
-                Ok(_) => (),
-                Err(smoltcp::Error::Unrecognized) => (),
-                Err(e) => {
-                    defmt::error!("poll error {}", e);
-                }
-            };
-        }
+        unreachable!();
     }
 
     #[task(binds = EXTI9_5, priority = 3, local = [receiver_cs_up])]
@@ -318,25 +326,5 @@ mod app {
             let dest = addrs.iter_mut().next().unwrap();
             *dest = IpCidr::Ipv4(cidr);
         });
-    }
-
-    fn write_response<W: core::fmt::Write>(socket: &mut W, path: &str) -> core::fmt::Result {
-        let r = match path {
-            "/" =>
-                socket.write_str(concat!("HTTP/1.1 200 Ok\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n",
-                    include_str!("index.html"))),
-            "/button.txt" => {
-                let press_count = BUTTON_PRESS_COUNT.load(Ordering::SeqCst);
-                defmt::info!("get button.txt {}", press_count);
-                socket.write_str("HTTP/1.1 200 Ok\r\nContent-Type: text/plain\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n")?;
-                write!(socket, "{}", press_count)
-            }
-            _ =>
-                socket.write_str("HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nNot found")
-        };
-        if r.is_err() {
-            defmt::error!("write error!");
-        }
-        r
     }
 }
