@@ -42,6 +42,9 @@ pub fn unescape<const N: usize>(s: &str) -> Result<String<N>, UnescapeError<N>> 
                     return Err(UnescapeError::BadHexUnicode);
                 };
                 match new_state {
+                    State::HexDigit(4, v) if v >= 0xd800 && v <= 0xdbff => {
+                        Ok(State::SurrogateEscape(v))
+                    }
                     State::HexDigit(4, v) => {
                         if let Some(uc) = char::from_u32(v) {
                             result.push(uc).map(|_| State::Text)
@@ -51,6 +54,42 @@ pub fn unescape<const N: usize>(s: &str) -> Result<String<N>, UnescapeError<N>> 
                     }
                     State::HexDigit(_, _) => Ok(new_state),
                     _ => unreachable!(),
+                }
+            }
+            State::SurrogateEscape(v) => {
+                if c == '\\' {
+                    Ok(State::SurrogateU(v))
+                } else {
+                    return Err(UnescapeError::BadHexUnicode)
+                }
+            }
+            State::SurrogateU(v) => {
+                if c == 'u' {
+                    Ok(State::SurrogateHexDigit(v, 0, 0))
+                } else {
+                    return Err(UnescapeError::BadHexUnicode)
+                }
+            }
+            State::SurrogateHexDigit(hi, n, v) => {
+                let new_state = if c.is_digit(16) {
+                    State::SurrogateHexDigit(hi, n + 1, v * 16 + c.to_digit(16).unwrap())
+                } else {
+                    return Err(UnescapeError::BadHexUnicode);
+                };
+                match new_state {
+                    State::SurrogateHexDigit(hi, 4, lo) if lo >= 0xdc00 && lo <= 0xdfff => {
+                        let codepoint = ((hi - 0xd800) << 10) + (lo - 0xdc00) + 0x10000;
+                        if let Some(uc) = char::from_u32(codepoint) {
+                            result.push(uc).map(|_| State::Text)
+                        } else {
+                            return Err(UnescapeError::BadHexUnicode);
+                        }
+                    }
+                    State::SurrogateHexDigit(_, 4, _) => {
+                        return Err(UnescapeError::BadHexUnicode)
+                    }
+                    State::SurrogateHexDigit(_, _, _) => Ok(new_state),
+                    _ => unreachable!()
                 }
             }
         };
@@ -72,6 +111,9 @@ enum State {
     Text,
     Escape,
     HexDigit(u16, u32),
+    SurrogateEscape(u32), // expecting backslash after first utf-16 value
+    SurrogateU(u32), // expecting u
+    SurrogateHexDigit(u32, u16, u32)
 }
 
 #[cfg(test)]
