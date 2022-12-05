@@ -13,6 +13,7 @@ mod tg_bot;
 mod tls_task;
 mod transmitter;
 mod tx_frame_buf;
+mod unescape;
 
 use defmt_rtt as _;
 use panic_probe as _;

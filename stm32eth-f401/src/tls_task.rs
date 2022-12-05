@@ -1,6 +1,7 @@
 use crate::adapter::TcpSocketAdapter;
-use crate::event;
 use crate::tg_bot::{get_updates, send_message, TgBotError};
+use crate::unescape::unescape;
+use crate::{event, unescape};
 use core::cell::RefCell;
 use core::ops::DerefMut;
 use core::pin::Pin;
@@ -108,13 +109,26 @@ impl<Rng: CryptoRng + RngCore> Bot<'_, '_, Rng> {
                 let update = &rsp.result[0];
                 this.last_update = Some(update.update_id);
                 if let Some(message) = &update.message {
-                    let mut s = String::<LEN>::new();
                     if let Some(text) = message.text {
-                        if s.push_str(text).is_err() {
-                            s.push_str("too long :(").ok();
+                        let ue = unescape(text);
+                        if let Err(e) = &ue {
+                            defmt::error!("unescape error: {:?}", e);
                         }
+                        match ue {
+                            Ok(s)
+                            | Err(unescape::UnescapeError::Overflow(s))
+                            | Err(unescape::UnescapeError::UnexpectedEnd(s)) => {
+                                Some((message.chat.id, s))
+                            }
+                            Err(_) => {
+                                let mut s = String::new();
+                                s.push_str("error").unwrap();
+                                Some((message.chat.id, s))
+                            }
+                        }
+                    } else {
+                        Some((message.chat.id, String::new()))
                     }
-                    Some((message.chat.id, s))
                 } else {
                     None
                 }
