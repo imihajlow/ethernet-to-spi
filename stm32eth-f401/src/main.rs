@@ -10,7 +10,7 @@ mod bot_token;
 mod event;
 mod tg;
 mod tg_bot;
-mod tls_task;
+mod bot_task;
 mod transmitter;
 mod tx_frame_buf;
 mod unescape;
@@ -23,7 +23,7 @@ mod app {
     use crate::adapter::TcpSocketAdapter;
     use crate::device::{ReceiverMutex, SpiDevice};
     use crate::receiver::Receiver;
-    use crate::tls_task;
+    use crate::bot_task;
     use crate::transmitter::Transmitter;
     use core::cell::RefCell;
     use core::sync::atomic::{AtomicUsize, Ordering};
@@ -285,7 +285,7 @@ mod app {
             monotonics::now().ticks() as i64
         });
         {
-            let mut task = tls_task::bot_task(
+            let mut task = bot_task::bot_task(
                 adapter1,
                 adapter2,
                 &mut rng1,
