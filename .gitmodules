@@ -1,9 +1,6 @@
 [submodule "model/74xx"]
 	path = model/74xx
 	url = https://github.com/imihajlow/74xx-verilog.git
-[submodule "stm32f1xx-hal"]
-	path = stm32f1xx-hal
-	url = https://github.com/imihajlow/stm32f1xx-hal.git
 [submodule "stm32f4xx-hal"]
 	path = stm32f4xx-hal
 	url = https://github.com/imihajlow/stm32f4xx-hal.git
