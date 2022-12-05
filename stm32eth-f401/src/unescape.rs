@@ -60,14 +60,14 @@ pub fn unescape<const N: usize>(s: &str) -> Result<String<N>, UnescapeError<N>> 
                 if c == '\\' {
                     Ok(State::SurrogateU(v))
                 } else {
-                    return Err(UnescapeError::BadHexUnicode)
+                    return Err(UnescapeError::BadHexUnicode);
                 }
             }
             State::SurrogateU(v) => {
                 if c == 'u' {
                     Ok(State::SurrogateHexDigit(v, 0, 0))
                 } else {
-                    return Err(UnescapeError::BadHexUnicode)
+                    return Err(UnescapeError::BadHexUnicode);
                 }
             }
             State::SurrogateHexDigit(hi, n, v) => {
@@ -85,11 +85,9 @@ pub fn unescape<const N: usize>(s: &str) -> Result<String<N>, UnescapeError<N>> 
                             return Err(UnescapeError::BadHexUnicode);
                         }
                     }
-                    State::SurrogateHexDigit(_, 4, _) => {
-                        return Err(UnescapeError::BadHexUnicode)
-                    }
+                    State::SurrogateHexDigit(_, 4, _) => return Err(UnescapeError::BadHexUnicode),
                     State::SurrogateHexDigit(_, _, _) => Ok(new_state),
-                    _ => unreachable!()
+                    _ => unreachable!(),
                 }
             }
         };
@@ -112,8 +110,8 @@ enum State {
     Escape,
     HexDigit(u16, u32),
     SurrogateEscape(u32), // expecting backslash after first utf-16 value
-    SurrogateU(u32), // expecting u
-    SurrogateHexDigit(u32, u16, u32)
+    SurrogateU(u32),      // expecting u
+    SurrogateHexDigit(u32, u16, u32),
 }
 
 #[cfg(test)]
