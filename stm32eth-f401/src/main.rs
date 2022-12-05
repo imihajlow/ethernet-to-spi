@@ -6,13 +6,13 @@ mod device;
 mod receiver;
 // mod server;
 mod adapter;
+mod bot_token;
+mod event;
+mod tg;
+mod tg_bot;
 mod tls_task;
 mod transmitter;
 mod tx_frame_buf;
-mod bot_token;
-mod tg;
-mod tg_bot;
-mod event;
 
 use defmt_rtt as _;
 use panic_probe as _;
@@ -24,17 +24,20 @@ mod app {
     use crate::receiver::Receiver;
     use crate::tls_task;
     use crate::transmitter::Transmitter;
+    use core::cell::RefCell;
     use core::sync::atomic::{AtomicUsize, Ordering};
     use core::task::{Context, Poll};
     use cortex_m::{interrupt, interrupt::Mutex, singleton};
     use futures::task::noop_waker_ref;
     use futures::Future;
     use rand::rngs::StdRng;
+    use rand::RngCore;
     use rand::SeedableRng;
     use smoltcp::iface::Interface;
     use smoltcp::iface::InterfaceBuilder;
     use smoltcp::iface::NeighborCache;
     use smoltcp::iface::Routes;
+    use smoltcp::iface::SocketStorage;
     use smoltcp::phy::Device;
     use smoltcp::socket::TcpSocket;
     use smoltcp::socket::TcpSocketBuffer;
@@ -47,17 +50,11 @@ mod app {
     use smoltcp::wire::Ipv4Cidr;
     use stm32f4xx_hal::dma::StreamsTuple;
     use stm32f4xx_hal::gpio::{Edge, Output};
-
-    use systick_monotonic::Systick;
-
-    use smoltcp::iface::SocketStorage;
-
     use stm32f4xx_hal::{
         gpio::{PinState, PA5, PC13, PC4},
         prelude::*,
     };
-
-    use core::cell::RefCell;
+    use systick_monotonic::Systick;
 
     #[monotonic(binds = SysTick, default = true)]
     type MyMono = Systick<1000>; // 1000 Hz
@@ -276,15 +273,24 @@ mod app {
         }
 
         defmt::info!("now = {}", monotonics::now().ticks());
-        let mut rng = StdRng::seed_from_u64(monotonics::now().ticks() as u64);
+        let mut rng1 = StdRng::seed_from_u64(monotonics::now().ticks() as u64);
+        let mut rng2 = StdRng::seed_from_u64(rng1.next_u64());
 
         let iface_cell = RefCell::new(iface);
-        let adapter1 =
-            TcpSocketAdapter::new(&iface_cell, tcp_handle_1, || monotonics::now().ticks() as i64);
-        let adapter2 =
-            TcpSocketAdapter::new(&iface_cell, tcp_handle_2, || monotonics::now().ticks() as i64);
+        let adapter1 = TcpSocketAdapter::new(&iface_cell, tcp_handle_1, || {
+            monotonics::now().ticks() as i64
+        });
+        let adapter2 = TcpSocketAdapter::new(&iface_cell, tcp_handle_2, || {
+            monotonics::now().ticks() as i64
+        });
         {
-            let mut task = tls_task::bot_task(adapter1, adapter2, &mut rng, ctx.local.bt_press_consumer);
+            let mut task = tls_task::bot_task(
+                adapter1,
+                adapter2,
+                &mut rng1,
+                &mut rng2,
+                ctx.local.bt_press_consumer,
+            );
             let mut task_pin = unsafe { core::pin::Pin::new_unchecked(&mut task) };
             let mut ctx = Context::from_waker(noop_waker_ref());
             let mut result = Poll::Pending;
