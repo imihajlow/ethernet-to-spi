@@ -8,19 +8,20 @@ use core::pin::Pin;
 use cortex_m::singleton;
 use futures::{future::select, future::Either, pin_mut};
 use heapless::{FnvIndexSet, String};
-use rand::{CryptoRng, RngCore};
+use rand::{CryptoRng, RngCore, SeedableRng, rngs::StdRng};
 
-pub async fn bot_task<Rng: CryptoRng + RngCore + Clone>(
+pub async fn bot_task(
+    seed: u64,
     adapter1: TcpSocketAdapter<'_>,
     mut adapter2: TcpSocketAdapter<'_>,
-    rng1: &mut Rng,
-    rng2: &mut Rng,
     bt_press_consumer: &mut crate::event::BtnPressConsumer,
 ) -> ! {
+    let mut rng1 = StdRng::seed_from_u64(seed);
+    let mut rng2 = StdRng::seed_from_u64(rng1.next_u64());
     let send_msg_rx_buf = singleton!(: [u8; 2048] = [0; 2048]).unwrap();
     let bot = RefCell::new(Bot {
         adapter_poll: adapter1,
-        rng: rng1,
+        rng: &mut rng1,
         last_update: None,
     });
     let mut get_msg_future_opt = None;
@@ -43,7 +44,7 @@ pub async fn bot_task<Rng: CryptoRng + RngCore + Clone>(
                 match msg_r {
                     Ok(Some((chat_id, text))) => {
                         button_listeners.insert(chat_id).ok();
-                        let r = send_message(chat_id, &text, send_msg_rx_buf, &mut adapter2, rng2)
+                        let r = send_message(chat_id, &text, send_msg_rx_buf, &mut adapter2, &mut rng2)
                             .await;
                         if let Err(e) = r {
                             defmt::error!("send_message error: {}", e);
@@ -64,7 +65,7 @@ pub async fn bot_task<Rng: CryptoRng + RngCore + Clone>(
                         "Button is pressed!",
                         send_msg_rx_buf,
                         &mut adapter2,
-                        rng2,
+                        &mut rng2,
                     )
                     .await;
                     if let Err(e) = r {

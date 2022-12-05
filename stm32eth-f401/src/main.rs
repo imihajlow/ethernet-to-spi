@@ -30,9 +30,6 @@ mod app {
     use cortex_m::{interrupt, interrupt::Mutex, singleton};
     use futures::task::noop_waker_ref;
     use futures::Future;
-    use rand::rngs::StdRng;
-    use rand::RngCore;
-    use rand::SeedableRng;
     use smoltcp::iface::Interface;
     use smoltcp::iface::InterfaceBuilder;
     use smoltcp::iface::NeighborCache;
@@ -273,8 +270,7 @@ mod app {
         }
 
         defmt::info!("now = {}", monotonics::now().ticks());
-        let mut rng1 = StdRng::seed_from_u64(monotonics::now().ticks() as u64);
-        let mut rng2 = StdRng::seed_from_u64(rng1.next_u64());
+        let seed = monotonics::now().ticks();
 
         let iface_cell = RefCell::new(iface);
         let adapter1 = TcpSocketAdapter::new(&iface_cell, tcp_handle_1, || {
@@ -285,10 +281,9 @@ mod app {
         });
         {
             let mut task = bot_task::bot_task(
+                seed,
                 adapter1,
                 adapter2,
-                &mut rng1,
-                &mut rng2,
                 ctx.local.bt_press_consumer,
             );
             let mut task_pin = unsafe { core::pin::Pin::new_unchecked(&mut task) };
