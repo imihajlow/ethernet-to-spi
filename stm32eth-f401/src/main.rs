@@ -4,7 +4,6 @@
 
 mod device;
 mod receiver;
-// mod server;
 mod adapter;
 mod bot_token;
 mod event;
