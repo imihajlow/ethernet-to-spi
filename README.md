@@ -1,5 +1,11 @@
 # An experiment project to receive and decode a 10BASE-T Ethernet signal
 
+The Nucleo64 shield schematic files are located in sch/shield/.
+
+The firmware for stm32f401 is located in stm32eth-f401/.
+
+## Receiver operation
+
 The idea is to convert the Manchester-encoded 10BASE-T signal to SPI and use an STM32 MCU to parse it.
 
 A 75C1168 chip is used to convert differential signals to 5V logic levels.
